@@ -28,7 +28,7 @@ static void on_menu_item_clicked(GtkMenuItem *item, gpointer user_data) {
 // Default configuration content
 const char *default_config_json =
 "{\n"
-"    \"indicator_icon\": \"system-run\",\n"
+"    \"indicator_icon\": \"media-playback-start\",\n"
 "    \"menu_items\": [\n"
 "      {\n"
 "        \"label\": \"Open Terminal\",\n"
@@ -242,10 +242,20 @@ int main(int argc, char **argv) {
     }
 
     char config_dir_path[PATH_MAX];
-    snprintf(config_dir_path, sizeof(config_dir_path), "%s/.config/trayactions", home_dir);
+    // Check snprintf return value for config_dir_path as well
+    int needed_dir = snprintf(config_dir_path, sizeof(config_dir_path), "%s/.config/trayactions", home_dir);
+    if (needed_dir < 0 || (size_t)needed_dir >= sizeof(config_dir_path)) {
+        g_printerr("Error: Configuration directory path is too long.\n");
+        return 1;
+    }
 
     char config_file_path[PATH_MAX];
-    snprintf(config_file_path, sizeof(config_file_path), "%s/config.json", config_dir_path);
+    // Check snprintf return value for config_file_path
+    int needed_file = snprintf(config_file_path, sizeof(config_file_path), "%s/config.json", config_dir_path);
+    if (needed_file < 0 || (size_t)needed_file >= sizeof(config_file_path)) {
+        g_printerr("Error: Configuration file path is too long.\n");
+        return 1;
+    }
 
     // --- Check if config file exists, create default if not ---
     if (access(config_file_path, F_OK) != 0) {

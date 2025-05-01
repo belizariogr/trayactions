@@ -1,0 +1,1 @@
+sudo apt-get install libappindicator3-1 libgtk-3-dev libappindicator3-dev libjson-c-dev

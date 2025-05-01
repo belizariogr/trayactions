@@ -8,9 +8,17 @@ TrayActions is a simple Linux tray application using GTK and AppIndicator. It di
 - Monitors configuration changes and reloads automatically.
 
 ## Building
-1. Make sure all dependencies are installed (GTK+ 3.0, libappindicator3, json-c).
+1. Make sure all dependencies are installed:  
+   - Compiler (`gcc`)
+   - GTK+ 3.0 (`libgtk-3-dev`)  
+   - AppIndicator 3 (`libappindicator3-dev`)  
+   - JSON-C (`libjson-c-dev`)  
+   - And the runtime library `libappindicator3-1`
 2. Run `./compile.sh` in the project folder.
 3. The compiled binary will be placed in `bin/trayactions`.
+
+## Dependencies
+The runtime `libappindicator3-1` is required to run and build.
 
 ## Usage
 Run `./bin/trayactions` to launch the app. A tray icon will appear, showing the configured menu.

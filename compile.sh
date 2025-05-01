@@ -12,8 +12,8 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 echo "Compilation successful."
-cd ../bin
+cd ..
 
 # Run the application
-chmod +x trayactions
-./trayactions 
+chmod +x bin/trayactions
+./bin/trayactions 

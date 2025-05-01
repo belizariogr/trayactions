@@ -25,7 +25,7 @@ typedef struct {
 } AppData;
 
 // Forward declaration
-static void reload_configuration(AppData *data);
+static void reload_configuration(AppData *data, gboolean is_initial_load); // <-- Add flag
 static gboolean reload_configuration_timeout_cb(gpointer user_data); // Timeout callback wrapper
 
 static void on_menu_item_clicked(GtkMenuItem *item, gpointer user_data) {
@@ -108,6 +108,22 @@ int ensure_dir_exists(const char *path) {
          return -1;
     }
     return 0; // Success
+}
+
+// --- Function to show warning dialog ---
+static void show_json_error_dialog(const char *config_file_path, const char *error_message) {
+    GtkWidget *dialog = gtk_message_dialog_new(NULL, // No parent window
+                                               GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+                                               GTK_MESSAGE_WARNING,
+                                               GTK_BUTTONS_OK,
+                                               "Invalid Configuration File");
+    char *secondary_text = g_strdup_printf("Could not parse the configuration file:\n%s\n\nError: %s\n\nThe application will continue with default or last known settings.",
+                                           config_file_path, error_message);
+    gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dialog), "%s", secondary_text);
+    g_free(secondary_text);
+
+    gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
 }
 
 GtkWidget* create_menu_from_json_array(struct json_object *menu_items_array, const char* config_file_path) {
@@ -245,11 +261,9 @@ GtkWidget* create_menu_from_json_array(struct json_object *menu_items_array, con
 }
 
 // --- Timeout Callback Wrapper ---
-// This function is called by the timeout. It calls the actual reload function
-// and then resets the flag. It returns FALSE so the timeout only runs once.
 static gboolean reload_configuration_timeout_cb(gpointer user_data) {
     AppData *data = (AppData *)user_data;
-    reload_configuration(data); // Call the actual reload logic
+    reload_configuration(data, FALSE); // <-- Pass FALSE for subsequent reloads
     // Reset the flag *after* reload_configuration has finished
     data->is_reloading = FALSE;
     g_print("Reload flag reset.\n");
@@ -257,92 +271,163 @@ static gboolean reload_configuration_timeout_cb(gpointer user_data) {
 }
 
 // --- Reload Function ---
-static void reload_configuration(AppData *data) {
-    // The is_reloading flag is managed by the caller (on_config_changed)
-    // and the timeout callback (reload_configuration_timeout_cb).
-    // No need to check/set it here directly anymore.
-
-    g_print("Reloading configuration from %s\n", data->config_file_path);
+static void reload_configuration(AppData *data, gboolean is_initial_load) {
+    g_print("Reloading configuration from %s (Initial Load: %s)\n",
+            data->config_file_path, is_initial_load ? "Yes" : "No");
 
     const char *default_indicator_icon = "system-run";
-    const char *indicator_icon_name = NULL; // Initialize to NULL
-    gchar *allocated_icon_name = NULL; // To track allocated memory for icon name
+    const char *indicator_icon_name = NULL;
+    gchar *allocated_icon_name = NULL;
     GtkWidget *new_menu = NULL;
     struct json_object *parsed_json = NULL;
     struct json_object *menu_items_array = NULL;
     struct json_object *indicator_icon_obj = NULL;
+    gboolean parse_error = FALSE;
+    const char *json_error_str = "Unknown parsing error";
 
     // --- Read and parse config file ---
     FILE *fp = fopen(data->config_file_path, "r");
     if (!fp) {
+        // File doesn't exist or isn't readable.
+        // If initial load, main() should have created it. If fopen fails now, log error.
+        // If subsequent reload, log error. In both cases, proceed to use defaults.
         g_printerr("Error opening %s for reload: %s\n", data->config_file_path, strerror(errno));
-        // Fallback to defaults if file cannot be opened
-        allocated_icon_name = g_strdup(default_indicator_icon);
-        new_menu = create_menu_from_json_array(NULL, data->config_file_path);
+        // No JSON parse error here, but we treat it like one for fallback purposes.
+        parse_error = TRUE;
+        json_error_str = "Could not open configuration file";
+        // If it's the initial load, we might still want to show a dialog?
+        // Let's show the dialog if it's an initial load and the file can't be opened *after* main tried to ensure it exists.
+        if (is_initial_load) {
+             show_json_error_dialog(data->config_file_path, json_error_str);
+             // We won't try to write the default file here, as we couldn't even open it for reading.
+        }
     } else {
-        fseek(fp, 0, SEEK_END);
-        long len = ftell(fp);
-        rewind(fp);
-        char *json_data = malloc(len + 1);
-        if (json_data) {
-            if (fread(json_data, 1, len, fp) == (size_t)len) {
-                json_data[len] = '\0';
-                parsed_json = json_tokener_parse(json_data);
-            } else {
-                 g_printerr("Error reading from %s\n", data->config_file_path);
-            }
-            free(json_data);
-        } else {
-            g_printerr("Failed to allocate memory for reading config file.\n");
-        }
-        fclose(fp);
+        // --- Try parsing the existing file ---
+        struct json_tokener *tok = json_tokener_new();
+        char buffer[1024];
+        int bytes_read;
+        enum json_tokener_error jerr = json_tokener_continue;
 
-        // --- Process parsed JSON (only if file was read successfully) ---
-        if (parsed_json && json_object_is_type(parsed_json, json_type_object)) {
-            // Get indicator icon name
-            if (json_object_object_get_ex(parsed_json, "indicator_icon", &indicator_icon_obj)) {
-                 const char *temp_icon_name = json_object_get_string(indicator_icon_obj);
-                 if (temp_icon_name && strlen(temp_icon_name) > 0) {
-                     allocated_icon_name = g_strdup(temp_icon_name);
-                 } else {
-                     g_warning("Invalid or empty 'indicator_icon' in %s. Using default.", data->config_file_path);
-                     allocated_icon_name = g_strdup(default_indicator_icon);
-                 }
-            } else {
-                 g_warning("Missing 'indicator_icon' key in %s. Using default.", data->config_file_path);
+        while ((bytes_read = fread(buffer, 1, sizeof(buffer), fp)) > 0 && jerr == json_tokener_continue) {
+            parsed_json = json_tokener_parse_ex(tok, buffer, bytes_read);
+            jerr = json_tokener_get_error(tok);
+        }
+        fclose(fp); // Close file after reading
+
+        if (jerr != json_tokener_success) {
+            json_error_str = json_tokener_error_desc(jerr);
+            g_printerr("Failed to parse JSON from %s: %s\n", data->config_file_path, json_error_str);
+            parse_error = TRUE;
+            if (parsed_json) { json_object_put(parsed_json); parsed_json = NULL; }
+        } else if (!parsed_json || !json_object_is_type(parsed_json, json_type_object)) {
+            json_error_str = "File does not contain a valid JSON object at the top level.";
+            g_printerr("Error in %s: %s\n", data->config_file_path, json_error_str);
+            parse_error = TRUE;
+            if (parsed_json) { json_object_put(parsed_json); parsed_json = NULL; }
+        }
+        json_tokener_free(tok);
+        // --- End JSON parsing attempt ---
+
+        // --- Handle parse error (if any) ---
+        if (parse_error) {
+            // Show dialog about the error
+            show_json_error_dialog(data->config_file_path, json_error_str);
+
+            // *** If it's the initial load, replace the invalid file AND try parsing the default string ***
+            if (is_initial_load) {
+                g_warning("Initial configuration file is invalid. Replacing with default content.");
+                FILE *write_fp = fopen(data->config_file_path, "w");
+                if (write_fp) {
+                    fprintf(write_fp, "%s", default_config_json);
+                    fclose(write_fp);
+                    g_info("Successfully replaced %s with default configuration.", data->config_file_path);
+
+                    // Now, try to parse the default string we just wrote
+                    g_info("Attempting to parse the newly written default configuration...");
+                    struct json_object *default_parsed_json = json_tokener_parse(default_config_json);
+
+                    if (default_parsed_json && json_object_is_type(default_parsed_json, json_type_object)) {
+                        g_info("Successfully parsed default configuration string.");
+                        // Discard any partially parsed object from the failed attempt
+                        if (parsed_json) {
+                            json_object_put(parsed_json);
+                        }
+                        // Use the newly parsed default JSON object
+                        parsed_json = default_parsed_json;
+                        // Clear the error flag so we proceed with processing this default JSON
+                        parse_error = FALSE;
+                        json_error_str = NULL;
+                    } else {
+                        // This should NOT happen if default_config_json is valid!
+                        g_critical("Failed to parse the internal default_config_json string! Check the string syntax.");
+                        if (default_parsed_json) { // Free if parsing failed but returned something
+                             json_object_put(default_parsed_json);
+                        }
+                        // Keep parse_error = TRUE, will fall back to NULL menu array later
+                    }
+                } else {
+                    g_printerr("Failed to open %s for writing to replace with default: %s",
+                               data->config_file_path, strerror(errno));
+                    // Keep parse_error = TRUE, will fall back to NULL menu array later
+                }
+            }
+            // If not initial load, or if writing/parsing the default failed, parse_error remains TRUE.
+        }
+    } // End of else block for successful fopen()
+
+    // --- Process JSON (either originally parsed, or the default parsed after initial error) ---
+    if (!parse_error && parsed_json) {
+        g_info("Processing valid JSON configuration...");
+        // Get indicator icon name
+        if (json_object_object_get_ex(parsed_json, "indicator_icon", &indicator_icon_obj)) {
+             const char *temp_icon_name = json_object_get_string(indicator_icon_obj);
+             if (temp_icon_name && strlen(temp_icon_name) > 0) {
+                 allocated_icon_name = g_strdup(temp_icon_name);
+             } else {
+                 g_warning("Invalid or empty 'indicator_icon' in config '%s'. Using default.", data->config_file_path);
                  allocated_icon_name = g_strdup(default_indicator_icon);
-            }
-
-            // Get menu items array
-            if (json_object_object_get_ex(parsed_json, "menu_items", &menu_items_array)) {
-                 new_menu = create_menu_from_json_array(menu_items_array, data->config_file_path);
-            } else {
-                 g_warning("Missing 'menu_items' key in %s. Creating default menu.", data->config_file_path);
-                 new_menu = create_menu_from_json_array(NULL, data->config_file_path);
-            }
+             }
         } else {
-            g_printerr("Failed to parse %s or it's not a JSON object. Using defaults.\n", data->config_file_path);
-            allocated_icon_name = g_strdup(default_indicator_icon);
-            new_menu = create_menu_from_json_array(NULL, data->config_file_path);
+             g_warning("Missing 'indicator_icon' key in config '%s'. Using default.", data->config_file_path);
+             allocated_icon_name = g_strdup(default_indicator_icon);
         }
 
-        // Free the parsed JSON object
-        if (parsed_json) {
-            json_object_put(parsed_json);
-            parsed_json = NULL;
+        // Get menu items array
+        if (json_object_object_get_ex(parsed_json, "menu_items", &menu_items_array)) {
+             if (json_object_is_type(menu_items_array, json_type_array)) {
+                 new_menu = create_menu_from_json_array(menu_items_array, data->config_file_path);
+             } else {
+                 g_warning("'menu_items' key found in config '%s' but it's not an array. Creating default menu.", data->config_file_path);
+                 new_menu = create_menu_from_json_array(NULL, data->config_file_path);
+             }
+        } else {
+             g_warning("Missing 'menu_items' key in config '%s'. Creating default menu.", data->config_file_path);
+             new_menu = create_menu_from_json_array(NULL, data->config_file_path);
         }
+    } else {
+        // Fallback: Parsing failed and wasn't recovered by loading defaults, or fopen failed initially.
+        g_warning("Falling back to hardcoded default icon and empty menu items array.");
+        allocated_icon_name = g_strdup(default_indicator_icon);
+        // Pass NULL to create_menu_from_json_array which should handle it gracefully
+        // (e.g., create menu with only Quit/Preferences).
+        new_menu = create_menu_from_json_array(NULL, data->config_file_path);
     }
-    // --- End Read/Parse/Process ---
 
-    // Use the allocated name, or the default if allocation failed or wasn't needed
-    indicator_icon_name = allocated_icon_name ? allocated_icon_name : default_indicator_icon;
+    // Free the parsed JSON object (whether original or the parsed default)
+    if (parsed_json) {
+        json_object_put(parsed_json);
+        parsed_json = NULL;
+    }
+    // --- End JSON Processing ---
 
     // --- Update Indicator ---
+    indicator_icon_name = allocated_icon_name ? allocated_icon_name : default_indicator_icon;
+
     if (!new_menu) {
-        g_printerr("Failed to create new menu during reload. Keeping old menu.\n");
-        g_free(allocated_icon_name); // Free the duplicated icon name if menu creation failed
-        // NOTE: The is_reloading flag is reset by the timeout callback wrapper
-        return; // Avoid changing indicator if menu failed
+        // This happens if create_menu_from_json_array returns NULL even when passed NULL.
+        g_critical("CRITICAL: Failed to create even a default menu structure. Keeping old menu if possible.");
+        g_free(allocated_icon_name);
+        return;
     }
 
     // Update the icon
@@ -360,8 +445,6 @@ static void reload_configuration(AppData *data) {
     app_indicator_set_menu(data->indicator, GTK_MENU(new_menu));
     data->current_menu = new_menu; // Update the pointer to the current menu
     g_info("Set new menu.");
-
-    // NOTE: The is_reloading flag is reset by the timeout callback wrapper
 }
 // --- End Reload Function ---
 
@@ -450,7 +533,7 @@ int main(int argc, char **argv) {
     app_indicator_set_status(app_data.indicator, APP_INDICATOR_STATUS_ACTIVE);
 
     // --- Initial Configuration Load ---
-    reload_configuration(&app_data); // Load initial config and set menu/icon
+    reload_configuration(&app_data, TRUE); // Pass TRUE for the initial load
 
     // --- Setup File Monitoring ---
     GFile *config_gfile = g_file_new_for_path(app_data.config_file_path);

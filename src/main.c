@@ -6,12 +6,24 @@
 #include <unistd.h> // For access()
 #include <sys/stat.h> // For mkdir()
 #include <errno.h> // For errno
+#include <gio/gio.h> // <-- Add GIO for file monitoring
+#include <limits.h> // <-- Add for PATH_MAX (might be implicitly included, but good practice)
 
 typedef struct {
-    char *description; // Renamed from 'descricao'
-    char *command;     // Renamed from 'comando'
-    char *icon;        // Added icon field
+    char *description; 
+    char *command;     
+    char *icon;        
 } MenuItemData;
+
+typedef struct {
+    AppIndicator *indicator;
+    char *config_file_path;
+    GFileMonitor *monitor; // To keep track of the monitor
+    GtkWidget *current_menu; // To keep track of the current menu widget
+} AppData;
+
+// Forward declaration
+static void reload_configuration(AppData *data);
 
 static void on_menu_item_clicked(GtkMenuItem *item, gpointer user_data) {
     const char *cmd = (const char *)user_data;
@@ -229,6 +241,130 @@ GtkWidget* create_menu_from_json_array(struct json_object *menu_items_array, con
     return menu;
 }
 
+// --- New Reload Function ---
+static void reload_configuration(AppData *data) {
+    g_print("Reloading configuration from %s\n", data->config_file_path);
+
+    const char *default_indicator_icon = "system-run";
+    const char *indicator_icon_name = default_indicator_icon;
+    GtkWidget *new_menu = NULL;
+    struct json_object *parsed_json = NULL;
+    struct json_object *menu_items_array = NULL;
+    struct json_object *indicator_icon_obj = NULL;
+
+    // --- Read and parse config file ---
+    FILE *fp = fopen(data->config_file_path, "r");
+    if (!fp) {
+        g_printerr("Error opening %s for reload: %s\n", data->config_file_path, strerror(errno));
+        // Keep using the old config/defaults if file is unreadable now?
+        // Or show an error state? For now, we'll just log and potentially use defaults below.
+    } else {
+        fseek(fp, 0, SEEK_END);
+        long len = ftell(fp);
+        rewind(fp);
+        char *json_data = malloc(len + 1);
+        if (json_data) {
+            if (fread(json_data, 1, len, fp) == (size_t)len) { // Check read result
+                json_data[len] = '\0';
+                parsed_json = json_tokener_parse(json_data);
+            } else {
+                 g_printerr("Error reading from %s\n", data->config_file_path);
+            }
+            free(json_data);
+        } else {
+            g_printerr("Failed to allocate memory for reading config file.\n");
+        }
+        fclose(fp);
+    }
+    // --- End Read and parse ---
+
+    // --- Process parsed JSON ---
+    if (parsed_json && json_object_is_type(parsed_json, json_type_object)) {
+        // Get indicator icon name
+        if (json_object_object_get_ex(parsed_json, "indicator_icon", &indicator_icon_obj)) {
+             const char *temp_icon_name = json_object_get_string(indicator_icon_obj);
+             if (temp_icon_name && strlen(temp_icon_name) > 0) {
+                 indicator_icon_name = g_strdup(temp_icon_name); // Use icon from JSON (strdup needed if parsed_json is freed)
+             } else {
+                 g_warning("Invalid or empty 'indicator_icon' in %s. Using default.", data->config_file_path);
+                 indicator_icon_name = g_strdup(default_indicator_icon);
+             }
+        } else {
+             g_warning("Missing 'indicator_icon' key in %s. Using default.", data->config_file_path);
+             indicator_icon_name = g_strdup(default_indicator_icon);
+        }
+
+        // Get menu items array
+        if (json_object_object_get_ex(parsed_json, "menu_items", &menu_items_array)) {
+             // Create the new menu based on the potentially updated array
+             new_menu = create_menu_from_json_array(menu_items_array, data->config_file_path);
+        } else {
+             g_warning("Missing 'menu_items' key in %s. Creating default menu.", data->config_file_path);
+             new_menu = create_menu_from_json_array(NULL, data->config_file_path); // Create empty menu + hardcoded items
+        }
+    } else {
+        g_printerr("Failed to parse %s or it's not a JSON object. Using defaults.\n", data->config_file_path);
+        indicator_icon_name = g_strdup(default_indicator_icon);
+        new_menu = create_menu_from_json_array(NULL, data->config_file_path); // Create empty menu + hardcoded items
+    }
+
+    // Free the parsed JSON object *after* extracting needed data (like icon name)
+    if (parsed_json) {
+        json_object_put(parsed_json);
+        parsed_json = NULL;
+    }
+
+    // --- Update Indicator ---
+    if (!new_menu) {
+        g_printerr("Failed to create new menu during reload. Keeping old menu.\n");
+        g_free((void*)indicator_icon_name); // Free the duplicated icon name if menu creation failed
+        return; // Avoid changing indicator if menu failed
+    }
+
+    // Update the icon
+    // Use app_indicator_set_icon_full for potentially themed icons
+    app_indicator_set_icon_full(data->indicator, indicator_icon_name, "Indicator Icon");
+    g_info("Set indicator icon to: %s", indicator_icon_name);
+    g_free((void*)indicator_icon_name); // Free the duplicated icon name
+
+    // Destroy the old menu *before* setting the new one
+    if (data->current_menu) {
+        gtk_widget_destroy(data->current_menu);
+        g_info("Destroyed old menu.");
+    }
+
+    // Set the new menu
+    app_indicator_set_menu(data->indicator, GTK_MENU(new_menu));
+    data->current_menu = new_menu; // Update the pointer to the current menu
+    g_info("Set new menu.");
+}
+// --- End Reload Function ---
+
+// --- File Monitor Callback ---
+static void on_config_changed(GFileMonitor *monitor,
+                              GFile *file,
+                              GFile *other_file,
+                              GFileMonitorEvent event_type,
+                              gpointer user_data)
+{
+    // We are interested in changes, creation, deletion, and moves
+    if (event_type == G_FILE_MONITOR_EVENT_CHANGED ||
+        event_type == G_FILE_MONITOR_EVENT_CREATED ||
+        event_type == G_FILE_MONITOR_EVENT_DELETED ||
+        event_type == G_FILE_MONITOR_EVENT_MOVED)
+    {
+        g_print("Config file change detected (event type: %d). Reloading.\n", event_type);
+        // Add a small delay to avoid rapid reloads if the editor saves in multiple steps
+        // Note: This uses g_timeout_add which might not be ideal if the event fires
+        // very rapidly. A more robust solution might involve debouncing.
+        g_timeout_add(500, (GSourceFunc)reload_configuration, user_data); // 500ms delay
+        // We return TRUE from the timeout function if we want it to run again,
+        // FALSE if it should run only once. reload_configuration returns void,
+        // so this cast implicitly returns 0 (FALSE).
+    }
+}
+// --- End File Monitor Callback ---
+
 int main(int argc, char **argv) {
     gtk_init(&argc, &argv);
 
@@ -241,37 +377,23 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    char config_dir_path[PATH_MAX];
-    // Check snprintf return value for config_dir_path as well
-    int needed_dir = snprintf(config_dir_path, sizeof(config_dir_path), "%s/.config/trayactions", home_dir);
-    if (needed_dir < 0 || (size_t)needed_dir >= sizeof(config_dir_path)) {
-        g_printerr("Error: Configuration directory path is too long.\n");
-        return 1;
-    }
-
-    char config_file_path[PATH_MAX];
-    // Check snprintf return value for config_file_path
-    int needed_file = snprintf(config_file_path, sizeof(config_file_path), "%s/config.json", config_dir_path);
-    if (needed_file < 0 || (size_t)needed_file >= sizeof(config_file_path)) {
-        g_printerr("Error: Configuration file path is too long.\n");
-        return 1;
-    }
+    // Use g_build_filename for safer path construction
+    char *config_dir_path = g_build_filename(home_dir, ".config", "trayactions", NULL);
+    char *config_file_path = g_build_filename(config_dir_path, "config.json", NULL);
 
     // --- Check if config file exists, create default if not ---
     if (access(config_file_path, F_OK) != 0) {
         g_info("Configuration file not found at %s. Creating default.", config_file_path);
-
-        // Ensure the directory exists
         if (ensure_dir_exists(config_dir_path) != 0) {
              g_printerr("Failed to create configuration directory. Exiting.\n");
+             g_free(config_dir_path);
+             g_free(config_file_path);
              return 1;
         }
-
-        // Create the default file
         FILE *default_fp = fopen(config_file_path, "w");
         if (!default_fp) {
             g_printerr("Error creating default config file %s: %s\n", config_file_path, strerror(errno));
-            // Proceed without config? Or exit? Let's proceed.
+            // Decide how to handle this - maybe exit? For now, continue.
         } else {
             fprintf(default_fp, "%s", default_config_json);
             fclose(default_fp);
@@ -280,83 +402,55 @@ int main(int argc, char **argv) {
     }
     // --- End config check/create ---
 
-    // --- Read and parse config file (using the full path) ---
-    const char *default_indicator_icon = "system-run"; // Fallback icon
-    const char *indicator_icon_name = default_indicator_icon;
-    GtkWidget *menu = NULL;
-    struct json_object *parsed_json = NULL;
-    struct json_object *menu_items_array = NULL;
-    struct json_object *indicator_icon_obj = NULL;
+    // --- Create AppData ---
+    AppData app_data = {0}; // Initialize struct members to NULL/0
+    app_data.config_file_path = g_strdup(config_file_path); // Store a copy
 
-    FILE *fp = fopen(config_file_path, "r"); // Use config_file_path
-    if (!fp) {
-        g_printerr("Error opening %s\n", config_file_path);
-        // Proceed with default icon and empty menu? Or exit? Let's proceed.
-    } else {
-        fseek(fp, 0, SEEK_END);
-        long len = ftell(fp);
-        rewind(fp);
-        char *data = malloc(len + 1);
-        if (data) { // Check malloc result
-            fread(data, 1, len, fp);
-            data[len] = '\0';
-            parsed_json = json_tokener_parse(data);
-            free(data);
-        }
-        fclose(fp);
-    }
-    // --- End Read and parse ---
-
-    // --- Process parsed JSON ---
-    if (parsed_json && json_object_is_type(parsed_json, json_type_object)) {
-        // Get indicator icon name
-        if (json_object_object_get_ex(parsed_json, "indicator_icon", &indicator_icon_obj)) {
-             const char *temp_icon_name = json_object_get_string(indicator_icon_obj);
-             if (temp_icon_name && strlen(temp_icon_name) > 0) { // Basic check
-                 indicator_icon_name = temp_icon_name; // Use icon from JSON
-             } else {
-                 g_warning("Invalid or empty 'indicator_icon' in %s. Using default.", config_file_path);
-             }
-        } else {
-             g_warning("Missing 'indicator_icon' key in %s. Using default.", config_file_path);
-        }
-
-        // Get menu items array
-        if (json_object_object_get_ex(parsed_json, "menu_items", &menu_items_array)) {
-             menu = create_menu_from_json_array(menu_items_array, config_file_path); // Pass the array part
-        } else {
-             g_warning("Missing 'menu_items' key in %s. No menu items will be loaded.", config_file_path);
-             menu = create_menu_from_json_array(NULL, config_file_path); // Create empty menu + hardcoded items
-        }
-    } else {
-        g_printerr("Failed to parse %s or it's not a JSON object. Using defaults.\n", config_file_path);
-        if (parsed_json) json_object_put(parsed_json); // Free if parsing failed partially
-        parsed_json = NULL;
-        menu = create_menu_from_json_array(NULL, config_file_path); // Create empty menu + hardcoded items
-    }
-    // --- End Process parsed JSON ---
-
-    if (!menu) {
-        g_printerr("Failed to create menu. Exiting.\n");
-         if (parsed_json) json_object_put(parsed_json);
-         return 1; // Exit if menu creation fails completely
-    }
-
-    AppIndicator *indicator = app_indicator_new(
+    // --- Create Indicator (initially with a placeholder icon) ---
+    app_data.indicator = app_indicator_new(
         "trayactions-indicator",
-        indicator_icon_name, // Use the icon name from JSON or default
+        "system-run", // Placeholder, will be updated by reload_configuration
         APP_INDICATOR_CATEGORY_APPLICATION_STATUS
     );
+    app_indicator_set_status(app_data.indicator, APP_INDICATOR_STATUS_ACTIVE);
 
-    app_indicator_set_status(indicator, APP_INDICATOR_STATUS_ACTIVE);
-    app_indicator_set_menu(indicator, GTK_MENU(menu));
+    // --- Initial Configuration Load ---
+    reload_configuration(&app_data); // Load initial config and set menu/icon
 
+    // --- Setup File Monitoring ---
+    GFile *config_gfile = g_file_new_for_path(app_data.config_file_path);
+    GError *error = NULL;
+    app_data.monitor = g_file_monitor_file(config_gfile, G_FILE_MONITOR_NONE, NULL, &error);
+
+    if (!app_data.monitor) {
+        g_printerr("Error creating file monitor for %s: %s\n", app_data.config_file_path, error->message);
+        g_error_free(error);
+        // Continue without monitoring? Or exit? Let's continue.
+    } else {
+        g_signal_connect(app_data.monitor, "changed", G_CALLBACK(on_config_changed), &app_data);
+        g_print("Monitoring %s for changes...\n", app_data.config_file_path);
+    }
+    g_object_unref(config_gfile); // Unref the GFile, monitor holds its own reference
+
+    // --- Run Main Loop ---
     gtk_main();
 
-    // Free the top-level JSON object when done
-    if (parsed_json) {
-        json_object_put(parsed_json);
+    // --- Cleanup ---
+    g_print("Exiting...\n");
+    if (app_data.monitor) {
+        g_file_monitor_cancel(app_data.monitor); // Stop monitoring
+        g_object_unref(app_data.monitor);        // Release monitor reference
     }
+    if (app_data.current_menu) {
+        // The menu should be owned by the indicator, but explicit destroy might be safer
+        // gtk_widget_destroy(app_data.current_menu); // Or let GTK handle it via indicator cleanup
+    }
+    g_free(app_data.config_file_path);
+    // Indicator is likely cleaned up by GTK, but g_object_unref might be needed if not parented.
+    // g_object_unref(app_data.indicator);
+
+    g_free(config_dir_path);
+    g_free(config_file_path); // Free paths allocated by g_build_filename
 
     return 0;
 }

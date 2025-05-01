@@ -8,11 +8,12 @@
 #include <errno.h> // For errno
 #include <gio/gio.h> // <-- Add GIO for file monitoring
 #include <limits.h> // <-- Add for PATH_MAX (might be implicitly included, but good practice)
+#include <glib.h>   // <-- Add for gboolean and GTimeVal if needed later
 
 typedef struct {
-    char *description; 
-    char *command;     
-    char *icon;        
+    char *label;       // Renamed from description
+    char *command;
+    char *icon;
 } MenuItemData;
 
 typedef struct {
@@ -20,10 +21,12 @@ typedef struct {
     char *config_file_path;
     GFileMonitor *monitor; // To keep track of the monitor
     GtkWidget *current_menu; // To keep track of the current menu widget
+    gboolean is_reloading; // Flag to prevent rapid/recursive reloads
 } AppData;
 
 // Forward declaration
 static void reload_configuration(AppData *data);
+static gboolean reload_configuration_timeout_cb(gpointer user_data); // Timeout callback wrapper
 
 static void on_menu_item_clicked(GtkMenuItem *item, gpointer user_data) {
     const char *cmd = (const char *)user_data;
@@ -149,28 +152,28 @@ GtkWidget* create_menu_from_json_array(struct json_object *menu_items_array, con
                 struct json_object *command_obj = json_object_object_get(json_item, "command");
                 struct json_object *icon_obj = json_object_object_get(json_item, "icon");
 
-                const char *description = json_object_get_string(label_obj);
+                const char *label = json_object_get_string(label_obj); // Renamed variable
                 const char *command = json_object_get_string(command_obj);
                 const char *icon_name = json_object_get_string(icon_obj);
 
                 // Check for regular item condition: label and command exist
-                if (description && command) {
+                if (label && command) { // Use renamed variable
                     GtkWidget *menu_item = NULL;
                     if (icon_name) {
                         GtkWidget *image = gtk_image_new_from_icon_name(icon_name, GTK_ICON_SIZE_MENU);
                         if (!image) {
                             g_warning("Could not load icon named '%s'. Falling back to text-only menu item.", icon_name);
-                            menu_item = gtk_menu_item_new_with_label(description);
+                            menu_item = gtk_menu_item_new_with_label(label); // Use renamed variable
                         } else {
                             menu_item = gtk_menu_item_new();
                             GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-                            GtkWidget *label = gtk_label_new(description);
+                            GtkWidget *label_widget = gtk_label_new(label); // Use renamed variable
                             gtk_box_pack_start(GTK_BOX(box), image, FALSE, FALSE, 0);
-                            gtk_box_pack_start(GTK_BOX(box), label, FALSE, FALSE, 0);
+                            gtk_box_pack_start(GTK_BOX(box), label_widget, FALSE, FALSE, 0); // Use renamed variable
                             gtk_container_add(GTK_CONTAINER(menu_item), box);
                         }
                     } else {
-                        menu_item = gtk_menu_item_new_with_label(description);
+                        menu_item = gtk_menu_item_new_with_label(label); // Use renamed variable
                     }
 
                     if (menu_item) {
@@ -241,12 +244,29 @@ GtkWidget* create_menu_from_json_array(struct json_object *menu_items_array, con
     return menu;
 }
 
-// --- New Reload Function ---
+// --- Timeout Callback Wrapper ---
+// This function is called by the timeout. It calls the actual reload function
+// and then resets the flag. It returns FALSE so the timeout only runs once.
+static gboolean reload_configuration_timeout_cb(gpointer user_data) {
+    AppData *data = (AppData *)user_data;
+    reload_configuration(data); // Call the actual reload logic
+    // Reset the flag *after* reload_configuration has finished
+    data->is_reloading = FALSE;
+    g_print("Reload flag reset.\n");
+    return G_SOURCE_REMOVE; // Same as returning FALSE, ensures timeout doesn't repeat
+}
+
+// --- Reload Function ---
 static void reload_configuration(AppData *data) {
+    // The is_reloading flag is managed by the caller (on_config_changed)
+    // and the timeout callback (reload_configuration_timeout_cb).
+    // No need to check/set it here directly anymore.
+
     g_print("Reloading configuration from %s\n", data->config_file_path);
 
     const char *default_indicator_icon = "system-run";
-    const char *indicator_icon_name = default_indicator_icon;
+    const char *indicator_icon_name = NULL; // Initialize to NULL
+    gchar *allocated_icon_name = NULL; // To track allocated memory for icon name
     GtkWidget *new_menu = NULL;
     struct json_object *parsed_json = NULL;
     struct json_object *menu_items_array = NULL;
@@ -256,15 +276,16 @@ static void reload_configuration(AppData *data) {
     FILE *fp = fopen(data->config_file_path, "r");
     if (!fp) {
         g_printerr("Error opening %s for reload: %s\n", data->config_file_path, strerror(errno));
-        // Keep using the old config/defaults if file is unreadable now?
-        // Or show an error state? For now, we'll just log and potentially use defaults below.
+        // Fallback to defaults if file cannot be opened
+        allocated_icon_name = g_strdup(default_indicator_icon);
+        new_menu = create_menu_from_json_array(NULL, data->config_file_path);
     } else {
         fseek(fp, 0, SEEK_END);
         long len = ftell(fp);
         rewind(fp);
         char *json_data = malloc(len + 1);
         if (json_data) {
-            if (fread(json_data, 1, len, fp) == (size_t)len) { // Check read result
+            if (fread(json_data, 1, len, fp) == (size_t)len) {
                 json_data[len] = '\0';
                 parsed_json = json_tokener_parse(json_data);
             } else {
@@ -275,57 +296,59 @@ static void reload_configuration(AppData *data) {
             g_printerr("Failed to allocate memory for reading config file.\n");
         }
         fclose(fp);
-    }
-    // --- End Read and parse ---
 
-    // --- Process parsed JSON ---
-    if (parsed_json && json_object_is_type(parsed_json, json_type_object)) {
-        // Get indicator icon name
-        if (json_object_object_get_ex(parsed_json, "indicator_icon", &indicator_icon_obj)) {
-             const char *temp_icon_name = json_object_get_string(indicator_icon_obj);
-             if (temp_icon_name && strlen(temp_icon_name) > 0) {
-                 indicator_icon_name = g_strdup(temp_icon_name); // Use icon from JSON (strdup needed if parsed_json is freed)
-             } else {
-                 g_warning("Invalid or empty 'indicator_icon' in %s. Using default.", data->config_file_path);
-                 indicator_icon_name = g_strdup(default_indicator_icon);
-             }
+        // --- Process parsed JSON (only if file was read successfully) ---
+        if (parsed_json && json_object_is_type(parsed_json, json_type_object)) {
+            // Get indicator icon name
+            if (json_object_object_get_ex(parsed_json, "indicator_icon", &indicator_icon_obj)) {
+                 const char *temp_icon_name = json_object_get_string(indicator_icon_obj);
+                 if (temp_icon_name && strlen(temp_icon_name) > 0) {
+                     allocated_icon_name = g_strdup(temp_icon_name);
+                 } else {
+                     g_warning("Invalid or empty 'indicator_icon' in %s. Using default.", data->config_file_path);
+                     allocated_icon_name = g_strdup(default_indicator_icon);
+                 }
+            } else {
+                 g_warning("Missing 'indicator_icon' key in %s. Using default.", data->config_file_path);
+                 allocated_icon_name = g_strdup(default_indicator_icon);
+            }
+
+            // Get menu items array
+            if (json_object_object_get_ex(parsed_json, "menu_items", &menu_items_array)) {
+                 new_menu = create_menu_from_json_array(menu_items_array, data->config_file_path);
+            } else {
+                 g_warning("Missing 'menu_items' key in %s. Creating default menu.", data->config_file_path);
+                 new_menu = create_menu_from_json_array(NULL, data->config_file_path);
+            }
         } else {
-             g_warning("Missing 'indicator_icon' key in %s. Using default.", data->config_file_path);
-             indicator_icon_name = g_strdup(default_indicator_icon);
+            g_printerr("Failed to parse %s or it's not a JSON object. Using defaults.\n", data->config_file_path);
+            allocated_icon_name = g_strdup(default_indicator_icon);
+            new_menu = create_menu_from_json_array(NULL, data->config_file_path);
         }
 
-        // Get menu items array
-        if (json_object_object_get_ex(parsed_json, "menu_items", &menu_items_array)) {
-             // Create the new menu based on the potentially updated array
-             new_menu = create_menu_from_json_array(menu_items_array, data->config_file_path);
-        } else {
-             g_warning("Missing 'menu_items' key in %s. Creating default menu.", data->config_file_path);
-             new_menu = create_menu_from_json_array(NULL, data->config_file_path); // Create empty menu + hardcoded items
+        // Free the parsed JSON object
+        if (parsed_json) {
+            json_object_put(parsed_json);
+            parsed_json = NULL;
         }
-    } else {
-        g_printerr("Failed to parse %s or it's not a JSON object. Using defaults.\n", data->config_file_path);
-        indicator_icon_name = g_strdup(default_indicator_icon);
-        new_menu = create_menu_from_json_array(NULL, data->config_file_path); // Create empty menu + hardcoded items
     }
+    // --- End Read/Parse/Process ---
 
-    // Free the parsed JSON object *after* extracting needed data (like icon name)
-    if (parsed_json) {
-        json_object_put(parsed_json);
-        parsed_json = NULL;
-    }
+    // Use the allocated name, or the default if allocation failed or wasn't needed
+    indicator_icon_name = allocated_icon_name ? allocated_icon_name : default_indicator_icon;
 
     // --- Update Indicator ---
     if (!new_menu) {
         g_printerr("Failed to create new menu during reload. Keeping old menu.\n");
-        g_free((void*)indicator_icon_name); // Free the duplicated icon name if menu creation failed
+        g_free(allocated_icon_name); // Free the duplicated icon name if menu creation failed
+        // NOTE: The is_reloading flag is reset by the timeout callback wrapper
         return; // Avoid changing indicator if menu failed
     }
 
     // Update the icon
-    // Use app_indicator_set_icon_full for potentially themed icons
     app_indicator_set_icon_full(data->indicator, indicator_icon_name, "Indicator Icon");
     g_info("Set indicator icon to: %s", indicator_icon_name);
-    g_free((void*)indicator_icon_name); // Free the duplicated icon name
+    g_free(allocated_icon_name); // Free the duplicated icon name
 
     // Destroy the old menu *before* setting the new one
     if (data->current_menu) {
@@ -337,6 +360,8 @@ static void reload_configuration(AppData *data) {
     app_indicator_set_menu(data->indicator, GTK_MENU(new_menu));
     data->current_menu = new_menu; // Update the pointer to the current menu
     g_info("Set new menu.");
+
+    // NOTE: The is_reloading flag is reset by the timeout callback wrapper
 }
 // --- End Reload Function ---
 
@@ -347,20 +372,29 @@ static void on_config_changed(GFileMonitor *monitor,
                               GFileMonitorEvent event_type,
                               gpointer user_data)
 {
+    AppData *data = (AppData *)user_data;
+
+    // Check if a reload is already in progress or scheduled
+    if (data->is_reloading) {
+        g_print("Config change detected, but reload already in progress/scheduled. Ignoring.\n");
+        return;
+    }
+
     // We are interested in changes, creation, deletion, and moves
     if (event_type == G_FILE_MONITOR_EVENT_CHANGED ||
         event_type == G_FILE_MONITOR_EVENT_CREATED ||
         event_type == G_FILE_MONITOR_EVENT_DELETED ||
         event_type == G_FILE_MONITOR_EVENT_MOVED)
     {
-        g_print("Config file change detected (event type: %d). Reloading.\n", event_type);
+        g_print("Config file change detected (event type: %d). Scheduling reload.\n", event_type);
+
+        // Set the flag *before* scheduling the timeout
+        data->is_reloading = TRUE;
+        g_print("Reload flag set.\n");
+
         // Add a small delay to avoid rapid reloads if the editor saves in multiple steps
-        // Note: This uses g_timeout_add which might not be ideal if the event fires
-        // very rapidly. A more robust solution might involve debouncing.
-        g_timeout_add(500, (GSourceFunc)reload_configuration, user_data); // 500ms delay
-        // We return TRUE from the timeout function if we want it to run again,
-        // FALSE if it should run only once. reload_configuration returns void,
-        // so this cast implicitly returns 0 (FALSE).
+        // Use the wrapper function for the timeout callback
+        g_timeout_add(500, reload_configuration_timeout_cb, data); // 500ms delay
     }
 }
 // --- End File Monitor Callback ---
@@ -403,8 +437,9 @@ int main(int argc, char **argv) {
     // --- End config check/create ---
 
     // --- Create AppData ---
-    AppData app_data = {0}; // Initialize struct members to NULL/0
+    AppData app_data = {0}; // Initialize struct members to NULL/0/FALSE
     app_data.config_file_path = g_strdup(config_file_path); // Store a copy
+    app_data.is_reloading = FALSE; // Explicitly initialize flag
 
     // --- Create Indicator (initially with a placeholder icon) ---
     app_data.indicator = app_indicator_new(

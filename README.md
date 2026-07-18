@@ -18,6 +18,9 @@ Tray integration uses the StatusNotifierItem and DBusMenu protocols directly thr
 2. Run `./compile.sh` in the project folder.
 3. The compiled binary will be placed in `bin/trayactions`.
 
+Pushing a version tag such as `v2.0.1` triggers a GitHub Actions workflow that
+builds the project and publishes a release with the Linux binary attached.
+
 ## Dependencies
 On Debian and Ubuntu based systems, install the build dependencies with:
 

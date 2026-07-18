@@ -13,6 +13,8 @@
 const char *default_config_json =
 "{\n"
 "    \"indicator_icon\": \"media-playback-start\",\n"
+"    \"preferences_icon\": \"\",\n"
+"    \"quit_icon\": \"\",\n"
 "    \"menu_items\": [\n"
 "      {\n"
 "        \"label\": \"Open Terminal\",\n"
@@ -34,6 +36,41 @@ const char *default_config_json =
 "      }\n"
 "    ]\n"
 "}\n";
+
+static gboolean ensure_empty_string_key(struct json_object *root, const char *key) {
+    struct json_object *value = NULL;
+    if (json_object_object_get_ex(root, key, &value)) {
+        return FALSE;
+    }
+    json_object_object_add(root, key, json_object_new_string(""));
+    return TRUE;
+}
+
+static void write_config_json(const char *config_file_path, struct json_object *root) {
+    const char *json_text = json_object_to_json_string_ext(
+        root,
+        JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_SPACED
+    );
+    GError *error = NULL;
+    if (!g_file_set_contents(config_file_path, json_text, -1, &error)) {
+        g_warning("Could not update %s with missing keys: %s", config_file_path, error->message);
+        g_error_free(error);
+        return;
+    }
+    g_info("Updated %s with missing configuration keys.", config_file_path);
+}
+
+static const char *read_optional_icon(
+    struct json_object *root,
+    const char *key
+) {
+    struct json_object *value = NULL;
+    if (!json_object_object_get_ex(root, key, &value) ||
+        !json_object_is_type(value, json_type_string)) {
+        return "";
+    }
+    return json_object_get_string(value);
+}
 
 void show_json_error_dialog(
     GtkApplication *application,
@@ -153,8 +190,22 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
     }
 
     // --- Process final JSON (parsed or fallback) ---
+    const char *preferences_icon = "";
+    const char *quit_icon = "";
+
     if (!parse_error && parsed_json) {
         g_info("Processing valid JSON configuration...");
+
+        gboolean config_updated = FALSE;
+        config_updated |= ensure_empty_string_key(parsed_json, "preferences_icon");
+        config_updated |= ensure_empty_string_key(parsed_json, "quit_icon");
+        if (config_updated) {
+            write_config_json(data->config_file_path, parsed_json);
+        }
+
+        preferences_icon = read_optional_icon(parsed_json, "preferences_icon");
+        quit_icon = read_optional_icon(parsed_json, "quit_icon");
+
         if (json_object_object_get_ex(parsed_json, "indicator_icon", &indicator_icon_obj)) {
             const char *temp_icon_name = json_object_get_string(indicator_icon_obj);
             if (temp_icon_name && strlen(temp_icon_name) > 0) {
@@ -170,19 +221,39 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
 
         if (json_object_object_get_ex(parsed_json, "menu_items", &menu_items_array)) {
             if (json_object_is_type(menu_items_array, json_type_array)) {
-                new_menu = create_menu_from_json_array(menu_items_array, data->config_file_path);
+                new_menu = create_menu_from_json_array(
+                    menu_items_array,
+                    data->config_file_path,
+                    preferences_icon,
+                    quit_icon
+                );
             } else {
                 g_warning("'menu_items' key found but not an array. Creating default menu.");
-                new_menu = create_menu_from_json_array(NULL, data->config_file_path);
+                new_menu = create_menu_from_json_array(
+                    NULL,
+                    data->config_file_path,
+                    preferences_icon,
+                    quit_icon
+                );
             }
         } else {
             g_warning("Missing 'menu_items' key. Creating default menu.");
-            new_menu = create_menu_from_json_array(NULL, data->config_file_path);
+            new_menu = create_menu_from_json_array(
+                NULL,
+                data->config_file_path,
+                preferences_icon,
+                quit_icon
+            );
         }
     } else {
         g_warning("Falling back to default icon and minimal menu.");
         allocated_icon_name = g_strdup(default_indicator_icon);
-        new_menu = create_menu_from_json_array(NULL, data->config_file_path);
+        new_menu = create_menu_from_json_array(
+            NULL,
+            data->config_file_path,
+            preferences_icon,
+            quit_icon
+        );
     }
     if (parsed_json) {
         json_object_put(parsed_json);

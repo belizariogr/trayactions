@@ -34,7 +34,10 @@ Run `./bin/trayactions` to launch the app. A tray icon will appear, showing the 
 
 ## Configuration
 - The default config file is located at `~/.config/trayactions/config.json`.
-- Modify this file to customize menu items and icons.  
+- Modify this file to customize menu items and icons.
+- `preferences_icon` and `quit_icon` control the built-in Preferences and Quit items.
+  Leave them empty (`""`) for no icon. If either key is missing, TrayActions adds it
+  as an empty string in the config file.
 - Changes are observed automatically, and the menu is reloaded on save.
 
 ## License

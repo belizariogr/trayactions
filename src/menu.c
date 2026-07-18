@@ -31,9 +31,15 @@ static void append_menu_item(
     g_ptr_array_add(items, item);
 }
 
+static const char *optional_icon(const char *icon) {
+    return (icon && *icon) ? icon : NULL;
+}
+
 GPtrArray *create_menu_from_json_array(
     struct json_object *menu_items_array,
-    const char *config_file_path
+    const char *config_file_path,
+    const char *preferences_icon,
+    const char *quit_icon
 ) {
     GPtrArray *items = g_ptr_array_new_with_free_func(menu_item_data_free);
     gint next_id = 1;
@@ -81,7 +87,7 @@ GPtrArray *create_menu_from_json_array(
 
             const char *icon = NULL;
             if (icon_object && json_object_is_type(icon_object, json_type_string)) {
-                icon = json_object_get_string(icon_object);
+                icon = optional_icon(json_object_get_string(icon_object));
             }
             append_menu_item(
                 items,
@@ -105,10 +111,17 @@ GPtrArray *create_menu_from_json_array(
         &next_id,
         "Preferences",
         preferences_command,
-        "preferences-system",
+        optional_icon(preferences_icon),
         FALSE
     );
-    append_menu_item(items, &next_id, "Quit", "quit", "application-exit", FALSE);
+    append_menu_item(
+        items,
+        &next_id,
+        "Quit",
+        "quit",
+        optional_icon(quit_icon),
+        FALSE
+    );
     g_free(preferences_command);
     g_free(quoted_path);
 

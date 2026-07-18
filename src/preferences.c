@@ -162,6 +162,7 @@ static void on_icon_selected(GtkButton *button, gpointer user_data) {
         update_icon_button(state, icon_name);
         tray_notify_icon_changed(state->data);
         config_save_indicator_icon(state->data, icon_name);
+        desktop_sync_icon(icon_name);
     }
 
     if (dialog) {

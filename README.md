@@ -15,6 +15,10 @@ On **COSMIC Desktop**, TrayActions can also move newly opened application window
 - CLI launchers: `--run` always starts a command; `--run-or-focus` focuses an
   existing window by `app_id` when possible, otherwise starts the command.
   These modes never open the tray and exit as soon as the request is sent.
+- Re-registers the tray icon when the panel's StatusNotifierWatcher appears
+  after login (fixes missing icon on reboot), when the tray host restarts, and
+  via a periodic health check if the icon is dropped while the process is still
+  running (COSMIC status-area watcher).
 
 ## Building
 1. Make sure all dependencies are installed:  

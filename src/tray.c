@@ -545,6 +545,386 @@ static const GDBusInterfaceVTable dbus_menu_vtable = {
     {0}
 };
 
+/*
+ * StatusNotifier keep-alive
+ * -------------------------
+ * On COSMIC the watcher is cosmic-applet-status-area (D-Bus activatable as
+ * com.system76.CosmicStatusNotifierWatcher, also owns
+ * org.kde.StatusNotifierWatcher). The panel host can restart, the watcher
+ * can vanish/reappear, or the item can be dropped from
+ * RegisteredStatusNotifierItems while our process keeps running. A single
+ * RegisterStatusNotifierItem at startup is not enough.
+ *
+ * Strategy:
+ *  1. Watch org.kde.StatusNotifierWatcher and (re)register when owned.
+ *  2. Listen for StatusNotifierHostRegistered / our ItemUnregistered.
+ *  3. Periodically verify we are still listed; if the watcher is missing,
+ *     activate the Cosmic service; if we were dropped, register again.
+ */
+
+static const char *SNI_WATCHER_NAME = "org.kde.StatusNotifierWatcher";
+static const char *SNI_WATCHER_PATH = "/StatusNotifierWatcher";
+static const char *SNI_WATCHER_IFACE = "org.kde.StatusNotifierWatcher";
+static const char *SNI_COSMIC_WATCHER_NAME = "com.system76.CosmicStatusNotifierWatcher";
+
+static const guint SNI_REGISTER_MAX_ATTEMPTS = 30;
+static const guint SNI_REGISTER_RETRY_MS = 1000;
+static const guint SNI_REGISTER_DEBOUNCE_MS = 750;
+static const guint SNI_HEALTH_INTERVAL_SEC = 10;
+
+static gboolean register_with_watcher(AppData *data, gboolean force);
+static void ensure_watcher_activated(AppData *data);
+
+static void clear_sni_register_retry(AppData *data) {
+    if (data && data->sni_register_retry_source) {
+        g_source_remove(data->sni_register_retry_source);
+        data->sni_register_retry_source = 0;
+    }
+}
+
+static gboolean retry_register_with_watcher(gpointer user_data) {
+    AppData *data = user_data;
+    data->sni_register_retry_source = 0;
+    register_with_watcher(data, TRUE);
+    return G_SOURCE_REMOVE;
+}
+
+static void schedule_register_retry(AppData *data) {
+    if (!data || data->sni_register_retry_source) {
+        return;
+    }
+    if (data->sni_register_attempts >= SNI_REGISTER_MAX_ATTEMPTS) {
+        g_warning(
+            "Giving up immediate tray registration retries after %u attempts; "
+            "health checks will keep trying.",
+            data->sni_register_attempts
+        );
+        return;
+    }
+    data->sni_register_retry_source =
+        g_timeout_add(SNI_REGISTER_RETRY_MS, retry_register_with_watcher, data);
+}
+
+static char *sni_service_id(AppData *data) {
+    const char *unique = data && data->bus
+                             ? g_dbus_connection_get_unique_name(data->bus)
+                             : NULL;
+    if (!unique) {
+        return NULL;
+    }
+    /* Explicit path matches hosts that store "busname/path" entries. */
+    return g_strdup_printf("%s/StatusNotifierItem", unique);
+}
+
+static gboolean registered_items_include_us(GVariant *items, AppData *data) {
+    const char *unique = g_dbus_connection_get_unique_name(data->bus);
+    if (!unique || !items) {
+        return FALSE;
+    }
+
+    char *with_path = g_strdup_printf("%s/StatusNotifierItem", unique);
+    gboolean found = FALSE;
+    GVariantIter iter;
+    const char *entry = NULL;
+    g_variant_iter_init(&iter, items);
+    while (g_variant_iter_next(&iter, "&s", &entry)) {
+        if (!entry) {
+            continue;
+        }
+        if (strcmp(entry, unique) == 0 || strcmp(entry, with_path) == 0) {
+            found = TRUE;
+            break;
+        }
+        /* Some hosts store only the path suffix after the unique name. */
+        if (g_str_has_prefix(entry, unique) &&
+            (entry[strlen(unique)] == '\0' || entry[strlen(unique)] == '/')) {
+            found = TRUE;
+            break;
+        }
+    }
+    g_free(with_path);
+    return found;
+}
+
+static void ensure_watcher_activated(AppData *data) {
+    if (!data || !data->bus) {
+        return;
+    }
+
+    /* Cosmic exposes an activatable well-known name; pinging starts it. */
+    g_dbus_connection_call(
+        data->bus,
+        SNI_COSMIC_WATCHER_NAME,
+        SNI_WATCHER_PATH,
+        "org.freedesktop.DBus.Peer",
+        "Ping",
+        NULL,
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        3000,
+        NULL,
+        NULL,
+        NULL
+    );
+}
+
+static gboolean register_with_watcher(AppData *data, gboolean force) {
+    if (!data || !data->bus || !data->status_notifier_registration_id) {
+        return FALSE;
+    }
+
+    gint64 now = g_get_monotonic_time() / 1000; /* ms */
+    if (!force && data->sni_last_register_ms > 0 &&
+        (now - data->sni_last_register_ms) < (gint64)SNI_REGISTER_DEBOUNCE_MS) {
+        return data->sni_registered;
+    }
+    data->sni_last_register_ms = now;
+    data->sni_register_attempts++;
+
+    char *service = sni_service_id(data);
+    if (!service) {
+        return FALSE;
+    }
+
+    GError *error = NULL;
+    g_dbus_connection_call_sync(
+        data->bus,
+        SNI_WATCHER_NAME,
+        SNI_WATCHER_PATH,
+        SNI_WATCHER_IFACE,
+        "RegisterStatusNotifierItem",
+        g_variant_new("(s)", service),
+        NULL,
+        G_DBUS_CALL_FLAGS_NONE,
+        3000,
+        NULL,
+        &error
+    );
+    g_free(service);
+
+    if (error) {
+        data->sni_registered = FALSE;
+        g_info(
+            "StatusNotifierWatcher not ready yet (%s); will retry.",
+            error->message
+        );
+        g_error_free(error);
+        ensure_watcher_activated(data);
+        schedule_register_retry(data);
+        return FALSE;
+    }
+
+    clear_sni_register_retry(data);
+    data->sni_register_attempts = 0;
+    data->sni_registered = TRUE;
+    g_info("Registered StatusNotifierItem with the tray host.");
+
+    /* Nudge hosts that only refresh on item signals after a re-register. */
+    tray_notify_icon_changed(data);
+    return TRUE;
+}
+
+static void on_sni_watcher_appeared(
+    GDBusConnection *connection,
+    const gchar *name,
+    const gchar *name_owner,
+    gpointer user_data
+) {
+    AppData *data = user_data;
+    (void)connection;
+    (void)name;
+    (void)name_owner;
+    clear_sni_register_retry(data);
+    data->sni_register_attempts = 0;
+    register_with_watcher(data, TRUE);
+}
+
+static void on_sni_watcher_vanished(
+    GDBusConnection *connection,
+    const gchar *name,
+    gpointer user_data
+) {
+    AppData *data = user_data;
+    (void)connection;
+    (void)name;
+    clear_sni_register_retry(data);
+    data->sni_register_attempts = 0;
+    data->sni_registered = FALSE;
+    g_info("StatusNotifierWatcher vanished; waiting for it to return.");
+}
+
+static void on_sni_host_registered(
+    GDBusConnection *connection,
+    const gchar *sender_name,
+    const gchar *object_path,
+    const gchar *interface_name,
+    const gchar *signal_name,
+    GVariant *parameters,
+    gpointer user_data
+) {
+    AppData *data = user_data;
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    (void)interface_name;
+    (void)signal_name;
+    (void)parameters;
+    g_info("StatusNotifierHostRegistered; re-registering tray icon.");
+    data->sni_register_attempts = 0;
+    register_with_watcher(data, TRUE);
+}
+
+static void on_sni_item_unregistered(
+    GDBusConnection *connection,
+    const gchar *sender_name,
+    const gchar *object_path,
+    const gchar *interface_name,
+    const gchar *signal_name,
+    GVariant *parameters,
+    gpointer user_data
+) {
+    AppData *data = user_data;
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    (void)interface_name;
+    (void)signal_name;
+
+    const char *service = NULL;
+    if (!parameters || !g_variant_is_of_type(parameters, G_VARIANT_TYPE("(s)"))) {
+        return;
+    }
+    g_variant_get(parameters, "(&s)", &service);
+    if (!service) {
+        return;
+    }
+
+    const char *unique = g_dbus_connection_get_unique_name(data->bus);
+    char *with_path = unique ? g_strdup_printf("%s/StatusNotifierItem", unique) : NULL;
+    gboolean is_us =
+        (unique && strcmp(service, unique) == 0) ||
+        (with_path && strcmp(service, with_path) == 0);
+    g_free(with_path);
+
+    if (!is_us) {
+        return;
+    }
+
+    g_info("Our StatusNotifierItem was unregistered; restoring it.");
+    data->sni_registered = FALSE;
+    data->sni_register_attempts = 0;
+    register_with_watcher(data, TRUE);
+}
+
+static gboolean sni_health_check(gpointer user_data) {
+    AppData *data = user_data;
+    if (!data || !data->bus || !data->status_notifier_registration_id) {
+        return G_SOURCE_CONTINUE;
+    }
+
+    GError *error = NULL;
+    GVariant *result = g_dbus_connection_call_sync(
+        data->bus,
+        SNI_WATCHER_NAME,
+        SNI_WATCHER_PATH,
+        "org.freedesktop.DBus.Properties",
+        "Get",
+        g_variant_new("(ss)", SNI_WATCHER_IFACE, "RegisteredStatusNotifierItems"),
+        G_VARIANT_TYPE("(v)"),
+        G_DBUS_CALL_FLAGS_NONE,
+        2000,
+        NULL,
+        &error
+    );
+
+    if (error) {
+        g_info(
+            "Tray health check: watcher unavailable (%s); activating.",
+            error->message
+        );
+        g_error_free(error);
+        data->sni_registered = FALSE;
+        ensure_watcher_activated(data);
+        /* NameAppeared / next health tick will register once the watcher is up. */
+        return G_SOURCE_CONTINUE;
+    }
+
+    GVariant *value = NULL;
+    g_variant_get(result, "(v)", &value);
+    g_variant_unref(result);
+
+    GVariant *items = value ? g_variant_get_variant(value) : NULL;
+    g_clear_pointer(&value, g_variant_unref);
+
+    gboolean present = registered_items_include_us(items, data);
+    g_clear_pointer(&items, g_variant_unref);
+
+    if (!present) {
+        g_info(
+            "Tray health check: icon missing from watcher list; re-registering."
+        );
+        data->sni_registered = FALSE;
+        data->sni_register_attempts = 0;
+        register_with_watcher(data, TRUE);
+    } else {
+        data->sni_registered = TRUE;
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
+static void sni_subscribe_watcher_signals(AppData *data) {
+    if (!data || !data->bus) {
+        return;
+    }
+
+    if (!data->sni_host_signal_id) {
+        data->sni_host_signal_id = g_dbus_connection_signal_subscribe(
+            data->bus,
+            SNI_WATCHER_NAME,
+            SNI_WATCHER_IFACE,
+            "StatusNotifierHostRegistered",
+            SNI_WATCHER_PATH,
+            NULL,
+            G_DBUS_SIGNAL_FLAGS_NONE,
+            on_sni_host_registered,
+            data,
+            NULL
+        );
+    }
+
+    if (!data->sni_item_unreg_signal_id) {
+        data->sni_item_unreg_signal_id = g_dbus_connection_signal_subscribe(
+            data->bus,
+            SNI_WATCHER_NAME,
+            SNI_WATCHER_IFACE,
+            "StatusNotifierItemUnregistered",
+            SNI_WATCHER_PATH,
+            NULL,
+            G_DBUS_SIGNAL_FLAGS_NONE,
+            on_sni_item_unregistered,
+            data,
+            NULL
+        );
+    }
+}
+
+static void sni_unsubscribe_watcher_signals(AppData *data) {
+    if (!data || !data->bus) {
+        data->sni_host_signal_id = 0;
+        data->sni_item_unreg_signal_id = 0;
+        return;
+    }
+    if (data->sni_host_signal_id) {
+        g_dbus_connection_signal_unsubscribe(data->bus, data->sni_host_signal_id);
+        data->sni_host_signal_id = 0;
+    }
+    if (data->sni_item_unreg_signal_id) {
+        g_dbus_connection_signal_unsubscribe(data->bus, data->sni_item_unreg_signal_id);
+        data->sni_item_unreg_signal_id = 0;
+    }
+}
+
 gboolean tray_start(AppData *data, GError **error) {
     GDBusNodeInfo *status_info = NULL;
     GDBusNodeInfo *menu_info = NULL;
@@ -589,24 +969,27 @@ gboolean tray_start(AppData *data, GError **error) {
         goto fail;
     }
 
-    GError *registration_error = NULL;
-    g_dbus_connection_call_sync(
+    sni_subscribe_watcher_signals(data);
+
+    /*
+     * Watch the KDE-compatible name Cosmic also claims. Appeared fires
+     * immediately when already owned, and again after panel/watcher restarts.
+     */
+    data->sni_watcher_watch_id = g_bus_watch_name_on_connection(
         data->bus,
-        "org.kde.StatusNotifierWatcher",
-        "/StatusNotifierWatcher",
-        "org.kde.StatusNotifierWatcher",
-        "RegisterStatusNotifierItem",
-        g_variant_new("(s)", g_dbus_connection_get_unique_name(data->bus)),
-        NULL,
-        G_DBUS_CALL_FLAGS_NONE,
-        -1,
-        NULL,
-        &registration_error
+        SNI_WATCHER_NAME,
+        G_BUS_NAME_WATCHER_FLAGS_NONE,
+        on_sni_watcher_appeared,
+        on_sni_watcher_vanished,
+        data,
+        NULL
     );
-    if (registration_error) {
-        g_warning("Could not register the tray icon: %s", registration_error->message);
-        g_error_free(registration_error);
-    }
+
+    /* If the watcher is not up yet (common at login), kick Cosmic activation. */
+    ensure_watcher_activated(data);
+
+    data->sni_health_source =
+        g_timeout_add_seconds(SNI_HEALTH_INTERVAL_SEC, sni_health_check, data);
 
     g_dbus_node_info_unref(status_info);
     g_dbus_node_info_unref(menu_info);
@@ -620,6 +1003,17 @@ fail:
 }
 
 void tray_stop(AppData *data) {
+    clear_sni_register_retry(data);
+    if (data->sni_health_source) {
+        g_source_remove(data->sni_health_source);
+        data->sni_health_source = 0;
+    }
+    if (data->sni_watcher_watch_id) {
+        g_bus_unwatch_name(data->sni_watcher_watch_id);
+        data->sni_watcher_watch_id = 0;
+    }
+    sni_unsubscribe_watcher_signals(data);
+    data->sni_registered = FALSE;
     if (!data->bus) {
         return;
     }

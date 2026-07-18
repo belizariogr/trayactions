@@ -39,8 +39,16 @@ void on_config_changed(GFileMonitor *monitor,
 
 /**
  * Persist indicator_icon while preserving the rest of the config file.
+ * Does not touch .desktop files — call desktop_sync_icon only after an
+ * explicit user selection in Preferences.
  */
 gboolean config_save_indicator_icon(AppData *data, const char *icon_name);
+
+/**
+ * Update Icon= in the user applications/autostart .desktop entries.
+ * Call only when the user picks an icon in Preferences.
+ */
+void desktop_sync_icon(const char *icon_name);
 
 /**
  * Persist app_workspaces while preserving the rest of the config file.

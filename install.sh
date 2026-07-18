@@ -6,16 +6,38 @@ set -euo pipefail
 sudo cp -f bin/trayactions /usr/local/bin/
 
 DESKTOP_DIR="${HOME}/.local/share/applications"
+AUTOSTART_DIR="${HOME}/.config/autostart"
+CONFIG_FILE="${HOME}/.config/trayactions/config.json"
+
+# Keep the user's chosen app icon across reinstalls (do not reset to the
+# stock Icon= from the repo .desktop template).
+resolve_desktop_icon() {
+    local icon=""
+    if [ -f "$CONFIG_FILE" ]; then
+        icon="$(sed -n 's/.*"indicator_icon"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG_FILE" | head -n1)"
+    fi
+    if [ -z "$icon" ] && [ -f "$DESKTOP_DIR/trayactions.desktop" ]; then
+        icon="$(sed -n 's/^Icon=//p' "$DESKTOP_DIR/trayactions.desktop" | head -n1)"
+    fi
+    if [ -z "$icon" ]; then
+        icon="$(sed -n 's/^Icon=//p' trayactions.desktop | head -n1)"
+    fi
+    printf '%s\n' "$icon"
+}
+
+DESKTOP_ICON="$(resolve_desktop_icon)"
+
 mkdir -p "$DESKTOP_DIR"
 cp -f trayactions.desktop "$DESKTOP_DIR/trayactions.desktop"
+sed -i "s|^Icon=.*|Icon=${DESKTOP_ICON}|" "$DESKTOP_DIR/trayactions.desktop"
 chmod 644 "$DESKTOP_DIR/trayactions.desktop"
 
 # Prefer the newly installed binary on login (replace older /usr/bin autostart entries).
-AUTOSTART_DIR="${HOME}/.config/autostart"
 mkdir -p "$AUTOSTART_DIR"
 cp -f trayactions.desktop "$AUTOSTART_DIR/trayactions.desktop"
 # Resolve via PATH so /usr/local/bin wins over a stale /usr/bin copy.
 sed -i 's|^Exec=.*|Exec=trayactions|' "$AUTOSTART_DIR/trayactions.desktop"
+sed -i "s|^Icon=.*|Icon=${DESKTOP_ICON}|" "$AUTOSTART_DIR/trayactions.desktop"
 chmod 644 "$AUTOSTART_DIR/trayactions.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
@@ -23,7 +45,7 @@ if command -v update-desktop-database >/dev/null 2>&1; then
 fi
 
 echo "Installed trayactions to /usr/local/bin/"
-echo "Installed desktop entry to $DESKTOP_DIR/trayactions.desktop"
+echo "Installed desktop entry to $DESKTOP_DIR/trayactions.desktop (Icon=${DESKTOP_ICON})"
 echo "Installed autostart entry to $AUTOSTART_DIR/trayactions.desktop"
 
 # Replace any running instance so this binary becomes the primary

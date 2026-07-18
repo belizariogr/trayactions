@@ -457,19 +457,11 @@ void on_config_changed(GFileMonitor *monitor,
     }
 }
 
-static void sync_desktop_icon(const char *icon_name) {
-    if (!icon_name || !*icon_name) {
+static void sync_one_desktop_icon(const char *desktop_path, const char *icon_name) {
+    if (!desktop_path || !icon_name || !*icon_name) {
         return;
     }
-
-    char *desktop_path = g_build_filename(
-        g_get_user_data_dir(),
-        "applications",
-        "trayactions.desktop",
-        NULL
-    );
     if (!g_file_test(desktop_path, G_FILE_TEST_IS_REGULAR)) {
-        g_free(desktop_path);
         return;
     }
 
@@ -488,9 +480,21 @@ static void sync_desktop_icon(const char *icon_name) {
         );
         g_clear_error(&error);
         g_key_file_unref(key_file);
-        g_free(desktop_path);
         return;
     }
+
+    char *current = g_key_file_get_string(
+        key_file,
+        G_KEY_FILE_DESKTOP_GROUP,
+        G_KEY_FILE_DESKTOP_KEY_ICON,
+        NULL
+    );
+    if (current && g_strcmp0(current, icon_name) == 0) {
+        g_free(current);
+        g_key_file_unref(key_file);
+        return;
+    }
+    g_free(current);
 
     g_key_file_set_string(
         key_file,
@@ -511,7 +515,31 @@ static void sync_desktop_icon(const char *icon_name) {
     }
 
     g_key_file_unref(key_file);
-    g_free(desktop_path);
+}
+
+void desktop_sync_icon(const char *icon_name) {
+    if (!icon_name || !*icon_name) {
+        return;
+    }
+
+    char *applications_path = g_build_filename(
+        g_get_user_data_dir(),
+        "applications",
+        "trayactions.desktop",
+        NULL
+    );
+    char *autostart_path = g_build_filename(
+        g_get_user_config_dir(),
+        "autostart",
+        "trayactions.desktop",
+        NULL
+    );
+
+    sync_one_desktop_icon(applications_path, icon_name);
+    sync_one_desktop_icon(autostart_path, icon_name);
+
+    g_free(applications_path);
+    g_free(autostart_path);
 }
 
 gboolean config_save_indicator_icon(AppData *data, const char *icon_name) {
@@ -528,8 +556,6 @@ gboolean config_save_indicator_icon(AppData *data, const char *icon_name) {
     json_object_object_add(root, "indicator_icon", json_object_new_string(icon_name));
     write_config_json(data->config_file_path, root);
     json_object_put(root);
-    sync_desktop_icon(icon_name);
-    tray_notify_icon_changed(data);
     return TRUE;
 }
 

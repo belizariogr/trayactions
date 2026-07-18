@@ -8,3 +8,7 @@ Terminal=false
 Categories=Utility;
 StartupNotify=false
 X-GNOME-UsesNotifications=false
+# Give the panel a moment at login; tray.c also re-registers when the
+# StatusNotifierWatcher bus name appears, so a short delay is only a hint.
+X-GNOME-Autostart-Delay=2
+X-GNOME-Autostart-enabled=true

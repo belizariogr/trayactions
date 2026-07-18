@@ -33,6 +33,14 @@ typedef struct {
     GtkWidget *preferences_window;
     guint status_notifier_registration_id;
     guint dbus_menu_registration_id;
+    guint sni_watcher_watch_id;
+    guint sni_host_signal_id;
+    guint sni_item_unreg_signal_id;
+    guint sni_health_source;
+    guint sni_register_retry_source;
+    guint sni_register_attempts;
+    gint64 sni_last_register_ms;
+    gboolean sni_registered;
     guint menu_revision;
     guint self_write_guard_source;
     guint reload_source;

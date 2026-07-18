@@ -5,6 +5,7 @@
 #include <glib.h>
 
 typedef struct _GtkApplication GtkApplication;
+typedef struct _GtkWidget GtkWidget;
 
 typedef struct {
     gint id;
@@ -17,12 +18,19 @@ typedef struct {
 } MenuItemData;
 
 typedef struct {
+    char *app_id;
+    gint workspace;
+} AppWorkspaceAssignment;
+
+typedef struct {
     GtkApplication *application;
     char *config_file_path;
     char *indicator_icon;
     GFileMonitor *monitor;
     GDBusConnection *bus;
     GPtrArray *menu_items;
+    GPtrArray *app_workspaces;
+    GtkWidget *preferences_window;
     guint status_notifier_registration_id;
     guint dbus_menu_registration_id;
     guint menu_revision;

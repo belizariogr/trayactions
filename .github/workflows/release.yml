@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libgtk-4-dev libjson-c-dev
+          sudo apt-get install -y build-essential libgtk-4-dev libjson-c-dev libwayland-dev
 
       - name: Build
         run: ./compile.sh

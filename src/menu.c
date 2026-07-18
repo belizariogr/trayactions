@@ -41,6 +41,7 @@ GPtrArray *create_menu_from_json_array(
     const char *preferences_icon,
     const char *quit_icon
 ) {
+    (void)config_file_path;
     GPtrArray *items = g_ptr_array_new_with_free_func(menu_item_data_free);
     gint next_id = 1;
 
@@ -104,8 +105,7 @@ GPtrArray *create_menu_from_json_array(
         append_menu_item(items, &next_id, NULL, NULL, NULL, TRUE);
     }
 
-    char *quoted_path = g_shell_quote(config_file_path);
-    char *preferences_command = g_strdup_printf("xdg-open %s", quoted_path);
+    char *preferences_command = g_strdup("preferences");
     append_menu_item(
         items,
         &next_id,
@@ -123,7 +123,6 @@ GPtrArray *create_menu_from_json_array(
         FALSE
     );
     g_free(preferences_command);
-    g_free(quoted_path);
 
     return items;
 }

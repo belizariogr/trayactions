@@ -4,16 +4,21 @@ TrayActions is a simple Linux tray application built with GTK 4. It displays a t
 
 Tray integration uses the StatusNotifierItem and DBusMenu protocols directly through GIO. This avoids loading the GTK 3-only AppIndicator library in a GTK 4 process.
 
+On **COSMIC Desktop**, TrayActions can also move newly opened application windows to a configured workspace using native Wayland protocols (no third-party helpers). On GNOME and other desktops the app runs normally; workspace routing stays inactive.
+
 ## Features
 - Displays a tray icon with menu items defined in a JSON file.
 - Each menu item can run a command or act as a separator.
 - Monitors configuration changes and reloads automatically.
+- GTK 4 Preferences window (Menu icon + Apps/Workspaces tabs).
+- COSMIC: route new app windows to a chosen workspace by `app_id`.
 
 ## Building
 1. Make sure all dependencies are installed:  
    - Compiler and build tools (`build-essential`)
    - GTK 4 (`libgtk-4-dev`)
    - JSON-C (`libjson-c-dev`)
+   - Wayland client (`libwayland-dev`, for `wayland-scanner` and headers)
    - GIO (installed as a GTK dependency)
 2. Run `./compile.sh` in the project folder.
 3. The compiled binary will be placed in `bin/trayactions`.
@@ -26,15 +31,24 @@ both binaries attached.
 On Debian and Ubuntu based systems, install the build dependencies with:
 
 ```sh
-sudo apt-get update && sudo apt-get install -y build-essential libgtk-4-dev libjson-c-dev
+sudo apt-get update && sudo apt-get install -y build-essential libgtk-4-dev libjson-c-dev libwayland-dev
 ```
 
 You can also run `./install_deps.sh`, which executes the same installation.
 
-The desktop must provide a StatusNotifierItem host. GNOME normally requires an AppIndicator/KStatusNotifierItem shell extension; KDE Plasma and many other panels support it natively.
+Runtime needs only libraries already pulled in by GTK 4 (including `libwayland-client`). No extra packages are required on GNOME. Workspace routing uses Cosmic compositor protocols already present on COSMIC Desktop.
+
+The desktop must provide a StatusNotifierItem host. GNOME normally requires an AppIndicator/KStatusNotifierItem shell extension; KDE Plasma, COSMIC, and many other panels support it natively.
 
 ## Usage
 Run `./bin/trayactions` to launch the app. A tray icon will appear, showing the configured menu. Only one instance is activated per desktop session.
+
+Open **Preferences** from the tray menu to:
+- change the tray indicator icon (24×24 theme icon picker);
+- edit tray menu items (label, command, icon, separators);
+- map open applications to workspace numbers (COSMIC).
+
+The preferences window opens as a modal dialog (so tiling layouts typically leave it floating) and follows the system light/dark preference from GNOME/`org.gnome.desktop.interface`.
 
 ## Configuration
 - The default config file is located at `~/.config/trayactions/config.json`.
@@ -42,6 +56,14 @@ Run `./bin/trayactions` to launch the app. A tray icon will appear, showing the 
 - `preferences_icon` and `quit_icon` control the built-in Preferences and Quit items.
   Leave them empty (`""`) for no icon. If either key is missing, TrayActions adds it
   as an empty string in the config file.
+- `app_workspaces` maps application IDs to 1-based workspace indexes, for example:
+
+```json
+"app_workspaces": [
+  { "app_id": "org.mozilla.firefox", "workspace": 2 }
+]
+```
+
 - Changes are observed automatically, and the menu is reloaded on save.
 
 ## License

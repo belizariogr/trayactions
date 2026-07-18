@@ -4,6 +4,8 @@
 #include <gtk/gtk.h>
 #include <string.h>
 
+#include "preferences.h"
+
 /* Panel menus typically use 16–24px icons. */
 static const int MENU_ICON_SIZE = 22;
 
@@ -271,6 +273,11 @@ static void activate_menu_item(AppData *data, gint id) {
 
     if (strcmp(item->command, "quit") == 0) {
         g_application_quit(G_APPLICATION(data->application));
+        return;
+    }
+
+    if (strcmp(item->command, "preferences") == 0) {
+        preferences_show(data);
         return;
     }
 

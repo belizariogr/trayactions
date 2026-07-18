@@ -3,7 +3,7 @@
 
 set -eu
 
-PACKAGES="build-essential libgtk-4-dev libjson-c-dev"
+PACKAGES="build-essential libgtk-4-dev libjson-c-dev libwayland-dev"
 
 echo "Installing: $PACKAGES"
 sudo apt-get update

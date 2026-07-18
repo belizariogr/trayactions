@@ -4,6 +4,40 @@
 #include "config.h"
 #include "tray.h"
 #include "utils.h"
+#include "workspace.h"
+
+static void apply_system_color_scheme(void) {
+    GtkSettings *settings = gtk_settings_get_default();
+    if (!settings) {
+        return;
+    }
+
+    gboolean prefer_dark = FALSE;
+    GSettingsSchemaSource *source = g_settings_schema_source_get_default();
+    if (source) {
+        GSettingsSchema *schema = g_settings_schema_source_lookup(
+            source,
+            "org.gnome.desktop.interface",
+            TRUE
+        );
+        if (schema) {
+            GSettings *gsettings = g_settings_new("org.gnome.desktop.interface");
+            char *scheme = g_settings_get_string(gsettings, "color-scheme");
+            prefer_dark = g_strcmp0(scheme, "prefer-dark") == 0;
+            g_free(scheme);
+
+            char *theme = g_settings_get_string(gsettings, "gtk-theme");
+            if (theme && *theme) {
+                g_object_set(settings, "gtk-theme-name", theme, NULL);
+            }
+            g_free(theme);
+            g_object_unref(gsettings);
+            g_settings_schema_unref(schema);
+        }
+    }
+
+    g_object_set(settings, "gtk-application-prefer-dark-theme", prefer_dark, NULL);
+}
 
 static gboolean prepare_configuration(AppData *data) {
     char *config_dir_path = g_build_filename(g_get_user_config_dir(), "trayactions", NULL);
@@ -44,6 +78,7 @@ static void application_activate(GtkApplication *application, gpointer user_data
     data->application = application;
     g_application_hold(G_APPLICATION(application));
 
+    apply_system_color_scheme();
     reload_configuration(data, TRUE);
 
     GError *error = NULL;
@@ -53,6 +88,8 @@ static void application_activate(GtkApplication *application, gpointer user_data
         g_application_quit(G_APPLICATION(application));
         return;
     }
+
+    workspace_backend_init(data);
 
     GFile *config_file = g_file_new_for_path(data->config_file_path);
     data->monitor = g_file_monitor_file(config_file, G_FILE_MONITOR_NONE, NULL, &error);
@@ -72,12 +109,15 @@ static void application_shutdown(GApplication *application, gpointer user_data) 
     AppData *data = user_data;
     (void)application;
 
+    workspace_backend_shutdown();
+
     if (data->monitor) {
         g_file_monitor_cancel(data->monitor);
         g_clear_object(&data->monitor);
     }
     tray_stop(data);
     g_clear_pointer(&data->menu_items, g_ptr_array_unref);
+    g_clear_pointer(&data->app_workspaces, g_ptr_array_unref);
     g_clear_pointer(&data->indicator_icon, g_free);
     g_clear_pointer(&data->config_file_path, g_free);
 }

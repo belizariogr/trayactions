@@ -8,6 +8,7 @@
 #include "menu.h"
 #include "tray.h"
 #include "utils.h"
+#include "workspace.h"
 
 // Global default configuration content
 const char *default_config_json =
@@ -15,6 +16,7 @@ const char *default_config_json =
 "    \"indicator_icon\": \"media-playback-start\",\n"
 "    \"preferences_icon\": \"\",\n"
 "    \"quit_icon\": \"\",\n"
+"    \"app_workspaces\": [],\n"
 "    \"menu_items\": [\n"
 "      {\n"
 "        \"label\": \"Open Terminal\",\n"
@@ -37,6 +39,27 @@ const char *default_config_json =
 "    ]\n"
 "}\n";
 
+void app_workspace_assignment_free(gpointer pointer) {
+    AppWorkspaceAssignment *assignment = pointer;
+    if (!assignment) {
+        return;
+    }
+    g_free(assignment->app_id);
+    g_free(assignment);
+}
+
+void menu_item_data_free(gpointer pointer) {
+    MenuItemData *item = pointer;
+    if (!item) {
+        return;
+    }
+    g_free(item->label);
+    g_free(item->command);
+    g_free(item->icon);
+    g_clear_pointer(&item->icon_png, g_bytes_unref);
+    g_free(item);
+}
+
 static gboolean ensure_empty_string_key(struct json_object *root, const char *key) {
     struct json_object *value = NULL;
     if (json_object_object_get_ex(root, key, &value)) {
@@ -44,6 +67,76 @@ static gboolean ensure_empty_string_key(struct json_object *root, const char *ke
     }
     json_object_object_add(root, key, json_object_new_string(""));
     return TRUE;
+}
+
+static gboolean ensure_empty_array_key(struct json_object *root, const char *key) {
+    struct json_object *value = NULL;
+    if (json_object_object_get_ex(root, key, &value)) {
+        return FALSE;
+    }
+    json_object_object_add(root, key, json_object_new_array());
+    return TRUE;
+}
+
+static struct json_object *load_config_root(const char *config_file_path) {
+    gchar *contents = NULL;
+    gsize length = 0;
+    GError *error = NULL;
+    if (!g_file_get_contents(config_file_path, &contents, &length, &error)) {
+        g_warning("Could not read %s: %s", config_file_path, error->message);
+        g_error_free(error);
+        return NULL;
+    }
+
+    struct json_object *root = json_tokener_parse(contents);
+    g_free(contents);
+    if (!root || !json_object_is_type(root, json_type_object)) {
+        if (root) {
+            json_object_put(root);
+        }
+        g_warning("Could not parse %s as a JSON object.", config_file_path);
+        return NULL;
+    }
+    return root;
+}
+
+static GPtrArray *parse_app_workspaces(struct json_object *array) {
+    GPtrArray *assignments = g_ptr_array_new_with_free_func(app_workspace_assignment_free);
+    if (!array || !json_object_is_type(array, json_type_array)) {
+        return assignments;
+    }
+
+    const size_t length = json_object_array_length(array);
+    for (size_t i = 0; i < length; i++) {
+        struct json_object *item = json_object_array_get_idx(array, i);
+        if (!json_object_is_type(item, json_type_object)) {
+            continue;
+        }
+
+        struct json_object *app_id_obj = NULL;
+        struct json_object *workspace_obj = NULL;
+        if (!json_object_object_get_ex(item, "app_id", &app_id_obj) ||
+            !json_object_is_type(app_id_obj, json_type_string)) {
+            continue;
+        }
+        if (!json_object_object_get_ex(item, "workspace", &workspace_obj) ||
+            !json_object_is_type(workspace_obj, json_type_int)) {
+            continue;
+        }
+
+        const char *app_id = json_object_get_string(app_id_obj);
+        gint workspace = json_object_get_int(workspace_obj);
+        if (!app_id || !*app_id || workspace < 1) {
+            continue;
+        }
+
+        AppWorkspaceAssignment *assignment = g_new0(AppWorkspaceAssignment, 1);
+        assignment->app_id = g_strdup(app_id);
+        assignment->workspace = workspace;
+        g_ptr_array_add(assignments, assignment);
+    }
+
+    return assignments;
 }
 
 static void write_config_json(const char *config_file_path, struct json_object *root) {
@@ -199,12 +292,24 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
         gboolean config_updated = FALSE;
         config_updated |= ensure_empty_string_key(parsed_json, "preferences_icon");
         config_updated |= ensure_empty_string_key(parsed_json, "quit_icon");
+        config_updated |= ensure_empty_array_key(parsed_json, "app_workspaces");
         if (config_updated) {
             write_config_json(data->config_file_path, parsed_json);
         }
 
         preferences_icon = read_optional_icon(parsed_json, "preferences_icon");
         quit_icon = read_optional_icon(parsed_json, "quit_icon");
+
+        struct json_object *app_workspaces_obj = NULL;
+        if (json_object_object_get_ex(parsed_json, "app_workspaces", &app_workspaces_obj)) {
+            GPtrArray *new_assignments = parse_app_workspaces(app_workspaces_obj);
+            g_clear_pointer(&data->app_workspaces, g_ptr_array_unref);
+            data->app_workspaces = new_assignments;
+        } else {
+            g_clear_pointer(&data->app_workspaces, g_ptr_array_unref);
+            data->app_workspaces = g_ptr_array_new_with_free_func(app_workspace_assignment_free);
+        }
+        workspace_watcher_refresh(data);
 
         if (json_object_object_get_ex(parsed_json, "indicator_icon", &indicator_icon_obj)) {
             const char *temp_icon_name = json_object_get_string(indicator_icon_obj);
@@ -254,6 +359,9 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
             preferences_icon,
             quit_icon
         );
+        if (!data->app_workspaces) {
+            data->app_workspaces = g_ptr_array_new_with_free_func(app_workspace_assignment_free);
+        }
     }
     if (parsed_json) {
         json_object_put(parsed_json);
@@ -288,6 +396,9 @@ void on_config_changed(GFileMonitor *monitor,
                        gpointer user_data)
 {
     AppData *data = (AppData *)user_data;
+    (void)monitor;
+    (void)file;
+    (void)other_file;
     if (data->is_reloading) {
         g_print("Config change detected, but reload already in progress. Ignoring.\n");
         return;
@@ -303,4 +414,165 @@ void on_config_changed(GFileMonitor *monitor,
         g_print("Reload flag set.\n");
         g_timeout_add(500, reload_configuration_timeout_cb, data);
     }
+}
+
+gboolean config_save_indicator_icon(AppData *data, const char *icon_name) {
+    if (!data || !data->config_file_path || !icon_name) {
+        return FALSE;
+    }
+
+    struct json_object *root = load_config_root(data->config_file_path);
+    if (!root) {
+        return FALSE;
+    }
+
+    json_object_object_add(root, "indicator_icon", json_object_new_string(icon_name));
+    write_config_json(data->config_file_path, root);
+    json_object_put(root);
+    return TRUE;
+}
+
+gboolean config_save_app_workspaces(AppData *data) {
+    if (!data || !data->config_file_path) {
+        return FALSE;
+    }
+
+    struct json_object *root = load_config_root(data->config_file_path);
+    if (!root) {
+        return FALSE;
+    }
+
+    struct json_object *array = json_object_new_array();
+    if (data->app_workspaces) {
+        for (guint i = 0; i < data->app_workspaces->len; i++) {
+            AppWorkspaceAssignment *assignment = g_ptr_array_index(data->app_workspaces, i);
+            if (!assignment || !assignment->app_id) {
+                continue;
+            }
+            struct json_object *item = json_object_new_object();
+            json_object_object_add(item, "app_id", json_object_new_string(assignment->app_id));
+            json_object_object_add(item, "workspace", json_object_new_int(assignment->workspace));
+            json_object_array_add(array, item);
+        }
+    }
+    json_object_object_add(root, "app_workspaces", array);
+    write_config_json(data->config_file_path, root);
+    json_object_put(root);
+    workspace_watcher_refresh(data);
+    return TRUE;
+}
+
+GPtrArray *config_load_editable_menu_items(AppData *data) {
+    GPtrArray *items = g_ptr_array_new_with_free_func(menu_item_data_free);
+    if (!data || !data->config_file_path) {
+        return items;
+    }
+
+    struct json_object *root = load_config_root(data->config_file_path);
+    if (!root) {
+        return items;
+    }
+
+    struct json_object *array = NULL;
+    if (!json_object_object_get_ex(root, "menu_items", &array) ||
+        !json_object_is_type(array, json_type_array)) {
+        json_object_put(root);
+        return items;
+    }
+
+    const size_t length = json_object_array_length(array);
+    for (size_t i = 0; i < length; i++) {
+        struct json_object *json_item = json_object_array_get_idx(array, i);
+        if (!json_object_is_type(json_item, json_type_object)) {
+            continue;
+        }
+
+        MenuItemData *item = g_new0(MenuItemData, 1);
+        struct json_object *value = NULL;
+        if (json_object_object_get_ex(json_item, "separator", &value) &&
+            json_object_is_type(value, json_type_boolean) &&
+            json_object_get_boolean(value)) {
+            item->separator = TRUE;
+            g_ptr_array_add(items, item);
+            continue;
+        }
+
+        struct json_object *label_object = NULL;
+        struct json_object *command_object = NULL;
+        struct json_object *icon_object = NULL;
+        json_object_object_get_ex(json_item, "label", &label_object);
+        json_object_object_get_ex(json_item, "command", &command_object);
+        json_object_object_get_ex(json_item, "icon", &icon_object);
+
+        if (!label_object || !json_object_is_type(label_object, json_type_string) ||
+            !command_object || !json_object_is_type(command_object, json_type_string)) {
+            g_free(item);
+            continue;
+        }
+
+        const char *command = json_object_get_string(command_object);
+        if (strcmp(command, "quit") == 0 || strcmp(command, "preferences") == 0) {
+            g_free(item);
+            continue;
+        }
+
+        item->label = g_strdup(json_object_get_string(label_object));
+        item->command = g_strdup(command);
+        if (icon_object && json_object_is_type(icon_object, json_type_string)) {
+            const char *icon = json_object_get_string(icon_object);
+            if (icon && *icon) {
+                item->icon = g_strdup(icon);
+            }
+        }
+        g_ptr_array_add(items, item);
+    }
+
+    json_object_put(root);
+    return items;
+}
+
+gboolean config_save_menu_items(AppData *data, GPtrArray *items) {
+    if (!data || !data->config_file_path) {
+        return FALSE;
+    }
+
+    struct json_object *root = load_config_root(data->config_file_path);
+    if (!root) {
+        return FALSE;
+    }
+
+    struct json_object *array = json_object_new_array();
+    if (items) {
+        for (guint i = 0; i < items->len; i++) {
+            MenuItemData *item = g_ptr_array_index(items, i);
+            if (!item) {
+                continue;
+            }
+            struct json_object *json_item = json_object_new_object();
+            if (item->separator) {
+                json_object_object_add(json_item, "separator", json_object_new_boolean(TRUE));
+            } else {
+                json_object_object_add(
+                    json_item,
+                    "label",
+                    json_object_new_string(item->label ? item->label : "")
+                );
+                json_object_object_add(
+                    json_item,
+                    "command",
+                    json_object_new_string(item->command ? item->command : "")
+                );
+                json_object_object_add(
+                    json_item,
+                    "icon",
+                    json_object_new_string(item->icon ? item->icon : "")
+                );
+            }
+            json_object_array_add(array, json_item);
+        }
+    }
+    json_object_object_add(root, "menu_items", array);
+    write_config_json(data->config_file_path, root);
+    json_object_put(root);
+    return TRUE;
 }

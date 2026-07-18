@@ -1030,7 +1030,7 @@ static void show_add_app_dialog(PreferencesState *state) {
     gtk_window_set_title(GTK_WINDOW(dialog), "Add Application");
     gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(state->window));
     gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
-    gtk_window_set_default_size(GTK_WINDOW(dialog), 400, 360);
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 1000, 900);
     g_signal_connect(dialog, "realize", G_CALLBACK(on_window_realize), NULL);
 
     GtkWidget *header = gtk_header_bar_new();

@@ -11,6 +11,8 @@ typedef struct {
     char *label;
     char *command;
     char *icon;
+    GBytes *icon_png;
+    gboolean icon_png_resolved;
     gboolean separator;
 } MenuItemData;
 

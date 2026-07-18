@@ -1,6 +1,99 @@
 #include "tray.h"
 
+#include <gdk-pixbuf/gdk-pixbuf.h>
+#include <gtk/gtk.h>
 #include <string.h>
+
+/* Panel menus typically use 16–24px icons. */
+static const int MENU_ICON_SIZE = 22;
+
+/*
+ * Hosts that render DBusMenu often treat icon-name as symbolic and recolor it
+ * (e.g. an all-white utilities-terminal). Load the regular theme icon ourselves
+ * and ship PNG bytes via icon-data so the host shows the same full-color art as
+ * Nautilus and other GTK apps.
+ */
+static GBytes *load_theme_icon_png(const char *icon_name) {
+    if (!icon_name || !*icon_name) {
+        return NULL;
+    }
+
+    GdkDisplay *display = gdk_display_get_default();
+    if (!display) {
+        return NULL;
+    }
+
+    GtkIconTheme *theme = gtk_icon_theme_get_for_display(display);
+    GtkIconPaintable *paintable = gtk_icon_theme_lookup_icon(
+        theme,
+        icon_name,
+        NULL,
+        MENU_ICON_SIZE,
+        1,
+        GTK_TEXT_DIR_NONE,
+        GTK_ICON_LOOKUP_FORCE_REGULAR
+    );
+    if (!paintable) {
+        return NULL;
+    }
+
+    GdkPixbuf *pixbuf = NULL;
+    GFile *file = gtk_icon_paintable_get_file(paintable);
+    if (file) {
+        GFileInputStream *stream = g_file_read(file, NULL, NULL);
+        if (stream) {
+            pixbuf = gdk_pixbuf_new_from_stream_at_scale(
+                G_INPUT_STREAM(stream),
+                MENU_ICON_SIZE,
+                MENU_ICON_SIZE,
+                TRUE,
+                NULL,
+                NULL
+            );
+            g_object_unref(stream);
+        }
+        g_object_unref(file);
+    }
+    g_object_unref(paintable);
+
+    if (!pixbuf) {
+        return NULL;
+    }
+
+    gchar *png_buffer = NULL;
+    gsize png_size = 0;
+    GError *error = NULL;
+    if (!gdk_pixbuf_save_to_buffer(pixbuf, &png_buffer, &png_size, "png", &error, NULL)) {
+        g_warning("Could not encode icon '%s' as PNG: %s", icon_name, error->message);
+        g_error_free(error);
+        g_object_unref(pixbuf);
+        return NULL;
+    }
+    g_object_unref(pixbuf);
+    return g_bytes_new_take(png_buffer, png_size);
+}
+
+static GBytes *menu_item_icon_png(MenuItemData *item) {
+    if (item->icon_png_resolved) {
+        return item->icon_png;
+    }
+    item->icon_png_resolved = TRUE;
+    item->icon_png = load_theme_icon_png(item->icon);
+    return item->icon_png;
+}
+
+static GVariant *icon_data_variant(GBytes *png) {
+    gsize size = 0;
+    gconstpointer data = g_bytes_get_data(png, &size);
+    return g_variant_new_from_data(
+        G_VARIANT_TYPE("ay"),
+        data,
+        size,
+        TRUE,
+        (GDestroyNotify)g_bytes_unref,
+        g_bytes_ref(png)
+    );
+}
 
 static const char *status_notifier_xml =
     "<node>"
@@ -111,6 +204,13 @@ static GVariant *menu_property(MenuItemData *item, const char *name) {
     if (strcmp(name, "icon-name") == 0) {
         return g_variant_new_string(item->icon ? item->icon : "");
     }
+    if (strcmp(name, "icon-data") == 0) {
+        GBytes *png = menu_item_icon_png(item);
+        if (png) {
+            return icon_data_variant(png);
+        }
+        return g_variant_new_array(G_VARIANT_TYPE_BYTE, NULL, 0);
+    }
     return g_variant_new_string("");
 }
 
@@ -124,7 +224,11 @@ static GVariant *menu_item_properties(MenuItemData *item) {
         g_variant_builder_add(&properties, "{sv}", "type", g_variant_new_string("separator"));
     } else {
         g_variant_builder_add(&properties, "{sv}", "label", g_variant_new_string(item->label));
-        if (item->icon && *item->icon) {
+        GBytes *png = menu_item_icon_png(item);
+        if (png) {
+            /* Prefer icon-data so hosts do not recolor a symbolic icon-name. */
+            g_variant_builder_add(&properties, "{sv}", "icon-data", icon_data_variant(png));
+        } else if (item->icon && *item->icon) {
             g_variant_builder_add(&properties, "{sv}", "icon-name", g_variant_new_string(item->icon));
         }
     }

@@ -10,6 +10,7 @@ static void menu_item_data_free(gpointer pointer) {
     g_free(item->label);
     g_free(item->command);
     g_free(item->icon);
+    g_clear_pointer(&item->icon_png, g_bytes_unref);
     g_free(item);
 }
 

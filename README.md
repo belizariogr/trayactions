@@ -50,12 +50,12 @@ Launch (or focus) apps without starting the tray:
 
 ```sh
 ./bin/trayactions --run google-chrome
-./bin/trayactions --run-or-focus google-chrome --app_id=google-chrome
-./bin/trayactions --run-or-focus "google-chrome www.uol.com.br" --app_id=chrome2
+./bin/trayactions --run-or-focus google-chrome --app-id=google-chrome
+./bin/trayactions --run-or-focus "google-chrome www.uol.com.br" --app-id=chrome2
 ```
 
 `--run` always starts the command and exits immediately (does not wait for the
-app). `--run-or-focus` looks for an open window with the given `--app_id` on
+app). `--run-or-focus` looks for an open window with the given `--app-id` on
 COSMIC and focuses it; if none is found (or focus is unavailable), it runs the
 command like `--run`. If the executable does not exist, the process exits with
 status `127`.

@@ -11,12 +11,12 @@ static void print_usage(const char *argv0) {
     g_printerr(
         "Usage:\n"
         "  %s --run <command>\n"
-        "  %s --run-or-focus <command> --app_id=<id>\n"
+        "  %s --run-or-focus <command> --app-id=<id>\n"
         "\n"
         "Examples:\n"
         "  %s --run google-chrome\n"
-        "  %s --run-or-focus google-chrome --app_id=google-chrome\n"
-        "  %s --run-or-focus \"google-chrome www.uol.com.br\" --app_id=chrome2\n",
+        "  %s --run-or-focus google-chrome --app-id=google-chrome\n"
+        "  %s --run-or-focus \"google-chrome www.uol.com.br\" --app-id=chrome2\n",
         argv0,
         argv0,
         argv0,
@@ -122,8 +122,8 @@ int cli_try_handle(int argc, char **argv) {
             command = argv[++i];
             continue;
         }
-        if (g_str_has_prefix(argv[i], "--app_id=")) {
-            app_id = argv[i] + strlen("--app_id=");
+        if (g_str_has_prefix(argv[i], "--app-id=")) {
+            app_id = argv[i] + strlen("--app-id=");
             continue;
         }
 
@@ -145,7 +145,7 @@ int cli_try_handle(int argc, char **argv) {
 
     if (mode == MODE_RUN_OR_FOCUS) {
         if (!app_id || !*app_id) {
-            g_printerr("--app_id=<id> is required with --run-or-focus.\n");
+            g_printerr("--app-id=<id> is required with --run-or-focus.\n");
             print_usage(argv[0]);
             return 1;
         }

@@ -17,6 +17,10 @@ GPtrArray *workspace_list_open_apps(void) {
     return cosmic_workspace_list_open_apps();
 }
 
+gboolean workspace_focus_app(const char *app_id) {
+    return cosmic_workspace_focus_app(app_id);
+}
+
 void workspace_watcher_refresh(AppData *data) {
     cosmic_workspace_refresh(data);
 }

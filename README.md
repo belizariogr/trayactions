@@ -12,6 +12,9 @@ On **COSMIC Desktop**, TrayActions can also move newly opened application window
 - Monitors configuration changes and reloads automatically.
 - GTK 4 Preferences window (Menu icon + Apps/Workspaces tabs).
 - COSMIC: route new app windows to a chosen workspace by `app_id`.
+- CLI launchers: `--run` always starts a command; `--run-or-focus` focuses an
+  existing window by `app_id` when possible, otherwise starts the command.
+  These modes never open the tray and exit as soon as the request is sent.
 
 ## Building
 1. Make sure all dependencies are installed:  
@@ -42,6 +45,20 @@ The desktop must provide a StatusNotifierItem host. GNOME normally requires an A
 
 ## Usage
 Run `./bin/trayactions` to launch the app. A tray icon will appear, showing the configured menu. Only one instance is activated per desktop session.
+
+Launch (or focus) apps without starting the tray:
+
+```sh
+./bin/trayactions --run google-chrome
+./bin/trayactions --run-or-focus google-chrome --app_id=google-chrome
+./bin/trayactions --run-or-focus "google-chrome www.uol.com.br" --app_id=chrome2
+```
+
+`--run` always starts the command and exits immediately (does not wait for the
+app). `--run-or-focus` looks for an open window with the given `--app_id` on
+COSMIC and focuses it; if none is found (or focus is unavailable), it runs the
+command like `--run`. If the executable does not exist, the process exits with
+status `127`.
 
 Open **Preferences** from the tray menu to:
 - change the tray indicator icon (24×24 theme icon picker);

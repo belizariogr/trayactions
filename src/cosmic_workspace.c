@@ -66,6 +66,7 @@ typedef struct {
     GlobalOffer toplevel_manager_offer;
     GlobalOffer ext_workspace_offer;
     GlobalOffer cosmic_workspace_offer;
+    GlobalOffer seat_offer;
     GArray *output_offers;
 
     struct ext_foreign_toplevel_list_v1 *foreign_list;
@@ -73,6 +74,7 @@ typedef struct {
     struct zcosmic_toplevel_manager_v1 *toplevel_manager;
     struct ext_workspace_manager_v1 *ext_workspace_manager;
     struct zcosmic_workspace_manager_v1 *cosmic_workspace_manager;
+    struct wl_seat *seat;
 
     GPtrArray *outputs;
     GPtrArray *workspaces;
@@ -1415,6 +1417,12 @@ static void registry_global(
     } else if (strcmp(interface, zcosmic_workspace_manager_v1_interface.name) == 0) {
         state->cosmic_workspace_offer.name = name;
         state->cosmic_workspace_offer.version = version;
+    } else if (strcmp(interface, wl_seat_interface.name) == 0) {
+        /* Prefer the first seat advertised by the compositor. */
+        if (state->seat_offer.name == 0) {
+            state->seat_offer.name = name;
+            state->seat_offer.version = version;
+        }
     }
 }
 
@@ -1470,6 +1478,15 @@ static void bind_collected_globals(CosmicState *state) {
             state->toplevel_manager_offer.name,
             &zcosmic_toplevel_manager_v1_interface,
             bind_version
+        );
+    }
+
+    if (state->seat_offer.name != 0) {
+        state->seat = wl_registry_bind(
+            state->registry,
+            state->seat_offer.name,
+            &wl_seat_interface,
+            1
         );
     }
 
@@ -1721,6 +1738,9 @@ void cosmic_workspace_shutdown(void) {
     if (state->cosmic_workspace_manager) {
         zcosmic_workspace_manager_v1_destroy(state->cosmic_workspace_manager);
     }
+    if (state->seat) {
+        wl_seat_destroy(state->seat);
+    }
     if (state->registry) {
         wl_registry_destroy(state->registry);
     }
@@ -1758,6 +1778,63 @@ GPtrArray *cosmic_workspace_list_open_apps(void) {
     }
     g_hash_table_destroy(seen);
     return apps;
+}
+
+static gboolean wait_initial_sync(CosmicState *state) {
+    if (!state || !state->display) {
+        return FALSE;
+    }
+
+    /* CLI path has no GLib main loop; dispatch until the sync callback fires. */
+    while (!state->initial_sync_done) {
+        if (wl_display_dispatch(state->display) == -1) {
+            return FALSE;
+        }
+    }
+
+    /* One more roundtrip so app_id events for existing toplevels arrive. */
+    if (wl_display_roundtrip(state->display) == -1) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+gboolean cosmic_workspace_focus_app(const char *app_id) {
+    if (!g_cosmic || !g_cosmic->active || !app_id || !*app_id) {
+        return FALSE;
+    }
+    if (!g_cosmic->toplevel_manager || !g_cosmic->seat) {
+        return FALSE;
+    }
+    if (!wait_initial_sync(g_cosmic)) {
+        return FALSE;
+    }
+
+    ToplevelInfo *match = NULL;
+    for (guint i = 0; i < g_cosmic->toplevels->len; i++) {
+        ToplevelInfo *info = g_ptr_array_index(g_cosmic->toplevels, i);
+        if (!info || !info->cosmic || !info->app_id) {
+            continue;
+        }
+        if (strcmp(info->app_id, app_id) != 0) {
+            continue;
+        }
+        match = info;
+        break;
+    }
+    if (!match) {
+        return FALSE;
+    }
+
+    zcosmic_toplevel_manager_v1_activate(
+        g_cosmic->toplevel_manager,
+        match->cosmic,
+        g_cosmic->seat
+    );
+    if (wl_display_roundtrip(g_cosmic->display) == -1) {
+        return FALSE;
+    }
+    return TRUE;
 }
 
 void cosmic_workspace_refresh(AppData *data) {

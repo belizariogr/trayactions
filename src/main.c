@@ -1,6 +1,7 @@
 #include <gtk/gtk.h>
 
 #include "appdata.h"
+#include "cli.h"
 #include "config.h"
 #include "tray.h"
 #include "utils.h"
@@ -131,6 +132,12 @@ static void application_shutdown(GApplication *application, gpointer user_data) 
 }
 
 int main(int argc, char **argv) {
+    /* CLI run/focus must not touch the tray or GtkApplication single-instance. */
+    int cli_status = cli_try_handle(argc, argv);
+    if (cli_status >= 0) {
+        return cli_status;
+    }
+
     AppData data = {0};
     data.application = gtk_application_new(
         "io.github.belizario.TrayActions",

@@ -27,6 +27,12 @@ gboolean workspace_backend_is_active(void);
 GPtrArray *workspace_list_open_apps(void);
 
 /**
+ * Focus an open toplevel whose app_id matches exactly.
+ * Returns TRUE if a window was activated. No-op when backend is inactive.
+ */
+gboolean workspace_focus_app(const char *app_id);
+
+/**
  * Re-read assignments from AppData after config reload.
  */
 void workspace_watcher_refresh(AppData *data);

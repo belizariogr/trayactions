@@ -23,7 +23,7 @@ for name in $PROTOCOLS; do
 done
 
 cc -std=c11 -Wall -Wextra -Wpedantic \
-    src/main.c src/config.c src/menu.c src/tray.c src/utils.c \
+    src/main.c src/cli.c src/config.c src/menu.c src/tray.c src/utils.c \
     src/preferences.c src/workspace.c src/cosmic_workspace.c \
     src/menu_order.c src/workspace_route.c \
     $GENERATED_SRCS \

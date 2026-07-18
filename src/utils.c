@@ -6,6 +6,10 @@
 #include <limits.h>
 #include <stdlib.h>
 
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
 int ensure_dir_exists(const char *path) {
     char tmp[PATH_MAX];
     snprintf(tmp, sizeof(tmp), "%s", path);

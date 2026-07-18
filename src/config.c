@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include "menu.h"
+#include "tray.h"
 #include "utils.h"
 
 // Global default configuration content
@@ -34,7 +35,11 @@ const char *default_config_json =
 "    ]\n"
 "}\n";
 
-void show_json_error_dialog(const char *config_file_path, const char *error_message) {
+void show_json_error_dialog(
+    GtkApplication *application,
+    const char *config_file_path,
+    const char *error_message
+) {
     GtkWidget *dialog = gtk_message_dialog_new(NULL,
                                                GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                                                GTK_MESSAGE_WARNING,
@@ -48,8 +53,9 @@ void show_json_error_dialog(const char *config_file_path, const char *error_mess
     gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dialog), "%s", secondary_text);
     g_free(secondary_text);
 
-    gtk_dialog_run(GTK_DIALOG(dialog));
-    gtk_widget_destroy(dialog);
+    gtk_window_set_application(GTK_WINDOW(dialog), application);
+    g_signal_connect_swapped(dialog, "response", G_CALLBACK(gtk_window_destroy), dialog);
+    gtk_window_present(GTK_WINDOW(dialog));
 }
 
 gboolean reload_configuration_timeout_cb(gpointer user_data) {
@@ -67,7 +73,7 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
     const char *default_indicator_icon = "system-run";
     const char *indicator_icon_name = NULL;
     gchar *allocated_icon_name = NULL;
-    GtkWidget *new_menu = NULL;
+    GPtrArray *new_menu = NULL;
     struct json_object *parsed_json = NULL;
     struct json_object *menu_items_array = NULL;
     struct json_object *indicator_icon_obj = NULL;
@@ -81,7 +87,7 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
         parse_error = TRUE;
         json_error_str = "Could not open configuration file";
         if (is_initial_load) {
-            show_json_error_dialog(data->config_file_path, json_error_str);
+            show_json_error_dialog(data->application, data->config_file_path, json_error_str);
         }
     } else {
         struct json_tokener *tok = json_tokener_new();
@@ -115,7 +121,7 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
         json_tokener_free(tok);
 
         if (parse_error) {
-            show_json_error_dialog(data->config_file_path, json_error_str);
+            show_json_error_dialog(data->application, data->config_file_path, json_error_str);
             if (is_initial_load) {
                 g_warning("Initial configuration file is invalid. Replacing with default content.");
                 FILE *write_fp = fopen(data->config_file_path, "w");
@@ -189,17 +195,18 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
     }
 
     indicator_icon_name = allocated_icon_name ? allocated_icon_name : default_indicator_icon;
-    app_indicator_set_icon_full(data->indicator, indicator_icon_name, "Indicator Icon");
+    g_free(data->indicator_icon);
+    data->indicator_icon = g_strdup(indicator_icon_name);
+    tray_notify_icon_changed(data);
     g_info("Set indicator icon to: %s", indicator_icon_name);
     g_free(allocated_icon_name);
 
-    if (data->current_menu) {
-        gtk_widget_destroy(data->current_menu);
-        g_info("Destroyed old menu.");
+    if (data->menu_items) {
+        g_ptr_array_unref(data->menu_items);
     }
 
-    app_indicator_set_menu(data->indicator, GTK_MENU(new_menu));
-    data->current_menu = new_menu;
+    data->menu_items = new_menu;
+    tray_notify_menu_changed(data);
     g_info("Set new menu.");
 }
 

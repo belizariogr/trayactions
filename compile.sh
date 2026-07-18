@@ -1,17 +1,12 @@
-cd src
-mkdir -p ../bin
+#!/usr/bin/env sh
+set -eu
 
-gcc main.c config.c menu.c utils.c \
-    -o ../bin/trayactions \
-    `pkg-config --cflags --libs gtk+-3.0 appindicator3-0.1 json-c`
+cd "$(dirname "$0")"
+mkdir -p bin
 
-if [ $? -ne 0 ]; then
-    echo "Compilation failed."
-    exit 1
-fi
+cc -std=c11 -Wall -Wextra -Wpedantic \
+    src/main.c src/config.c src/menu.c src/tray.c src/utils.c \
+    -o bin/trayactions \
+    $(pkg-config --cflags --libs gtk4 gio-2.0 json-c)
 
-echo "Compilation successful."
-cd ..
-
-chmod +x bin/trayactions
-./bin/trayactions
+echo "Compilation successful: bin/trayactions"

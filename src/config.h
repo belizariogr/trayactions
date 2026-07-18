@@ -12,7 +12,11 @@ extern const char *default_config_json;
 /**
  * Show a warning dialog about invalid JSON configuration.
  */
-void show_json_error_dialog(const char *config_file_path, const char *error_message);
+void show_json_error_dialog(
+    GtkApplication *application,
+    const char *config_file_path,
+    const char *error_message
+);
 
 /**
  * Reload the configuration.

@@ -1,1 +1,11 @@
-sudo apt-get install libappindicator3-1 libgtk-3-dev libappindicator3-dev libjson-c-dev
+#!/usr/bin/env sh
+# Install TrayActions build dependencies (Debian/Ubuntu).
+
+set -eu
+
+PACKAGES="build-essential libgtk-4-dev libjson-c-dev"
+
+echo "Installing: $PACKAGES"
+sudo apt-get update
+sudo apt-get install -y $PACKAGES
+echo "Dependencies installed. Build with: ./compile.sh"

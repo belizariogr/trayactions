@@ -1,25 +1,31 @@
 #ifndef APPDATA_H
 #define APPDATA_H
 
-#include <gtk/gtk.h>
-#include <libappindicator/app-indicator.h>
 #include <gio/gio.h>
 #include <glib.h>
 
-// Menu item structure
+typedef struct _GtkApplication GtkApplication;
+
 typedef struct {
+    gint id;
     char *label;
     char *command;
     char *icon;
+    gboolean separator;
 } MenuItemData;
 
-// Application data structure
 typedef struct {
-    AppIndicator *indicator;
+    GtkApplication *application;
     char *config_file_path;
-    GFileMonitor *monitor; 
-    GtkWidget *current_menu;
+    char *indicator_icon;
+    GFileMonitor *monitor;
+    GDBusConnection *bus;
+    GPtrArray *menu_items;
+    guint status_notifier_registration_id;
+    guint dbus_menu_registration_id;
+    guint menu_revision;
     gboolean is_reloading;
+    gboolean initialized;
 } AppData;
 
 #endif // APPDATA_H

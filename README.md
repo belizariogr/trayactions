@@ -19,7 +19,8 @@ Tray integration uses the StatusNotifierItem and DBusMenu protocols directly thr
 3. The compiled binary will be placed in `bin/trayactions`.
 
 Pushing a version tag such as `v2.0.1` triggers a GitHub Actions workflow that
-builds the project and publishes a release with the Linux binary attached.
+builds the project for Linux `x86_64` and `aarch64` and publishes a release with
+both binaries attached.
 
 ## Dependencies
 On Debian and Ubuntu based systems, install the build dependencies with:

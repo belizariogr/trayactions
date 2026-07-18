@@ -24,7 +24,8 @@ done
 
 cc -std=c11 -Wall -Wextra -Wpedantic \
     src/main.c src/config.c src/menu.c src/tray.c src/utils.c \
-    src/preferences.c src/workspace.c src/cosmic_workspace.c src/menu_order.c \
+    src/preferences.c src/workspace.c src/cosmic_workspace.c \
+    src/menu_order.c src/workspace_route.c \
     $GENERATED_SRCS \
     -o bin/trayactions \
     $(pkg-config --cflags --libs gtk4 gio-2.0 json-c gdk-pixbuf-2.0 wayland-client)

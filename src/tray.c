@@ -281,6 +281,7 @@ static void activate_menu_item(AppData *data, gint id) {
         return;
     }
 
+    /* User-configured launcher commands; config write == shell as the user. */
     const char *argv[] = {"/bin/sh", "-c", item->command, NULL};
     GError *error = NULL;
     if (!g_spawn_async(NULL, (char **)argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &error)) {
@@ -407,6 +408,29 @@ static void dbus_menu_method_call(
     (void)interface_name;
 
     if (strcmp(method_name, "GetLayout") == 0) {
+        gint parent_id = 0;
+        gint recursion_depth = -1;
+        const gchar **property_names = NULL;
+        g_variant_get(parameters, "(ii^a&s)", &parent_id, &recursion_depth, &property_names);
+        g_free(property_names);
+        (void)recursion_depth;
+        /* Flat menu: only the root layout is meaningful. */
+        if (parent_id != 0) {
+            g_dbus_method_invocation_return_value(
+                invocation,
+                g_variant_new(
+                    "(u@(ia{sv}av))",
+                    data->menu_revision,
+                    g_variant_new(
+                        "(i@a{sv}@av)",
+                        parent_id,
+                        g_variant_new_array(G_VARIANT_TYPE("{sv}"), NULL, 0),
+                        g_variant_new_array(G_VARIANT_TYPE_VARIANT, NULL, 0)
+                    )
+                )
+            );
+            return;
+        }
         g_dbus_method_invocation_return_value(
             invocation,
             g_variant_new("(u@(ia{sv}av))", data->menu_revision, menu_layout(data))
@@ -611,16 +635,54 @@ void tray_stop(AppData *data) {
 }
 
 void tray_notify_icon_changed(AppData *data) {
-    if (data->bus && data->status_notifier_registration_id) {
-        g_dbus_connection_emit_signal(
-            data->bus, NULL, "/StatusNotifierItem",
-            "org.kde.StatusNotifierItem", "NewIcon", NULL, NULL
-        );
-        g_dbus_connection_emit_signal(
-            data->bus, NULL, "/StatusNotifierItem",
-            "org.kde.StatusNotifierItem", "NewToolTip", NULL, NULL
-        );
+    if (!data || !data->bus || !data->status_notifier_registration_id) {
+        return;
     }
+
+    const char *icon_name = data->indicator_icon ? data->indicator_icon : "system-run";
+
+    /* Some hosts watch PropertiesChanged; SNI hosts watch NewIcon. Emit both. */
+    GVariantBuilder changed;
+    g_variant_builder_init(&changed, G_VARIANT_TYPE("a{sv}"));
+    g_variant_builder_add(&changed, "{sv}", "IconName", g_variant_new_string(icon_name));
+    g_variant_builder_add(
+        &changed,
+        "{sv}",
+        "ToolTip",
+        g_variant_new(
+            "(s@a(iiay)ss)",
+            icon_name,
+            empty_pixmaps(),
+            "TrayActions",
+            "Configurable actions"
+        )
+    );
+
+    GVariantBuilder invalidated;
+    g_variant_builder_init(&invalidated, G_VARIANT_TYPE("as"));
+
+    g_dbus_connection_emit_signal(
+        data->bus,
+        NULL,
+        "/StatusNotifierItem",
+        "org.freedesktop.DBus.Properties",
+        "PropertiesChanged",
+        g_variant_new(
+            "(sa{sv}as)",
+            "org.kde.StatusNotifierItem",
+            &changed,
+            &invalidated
+        ),
+        NULL
+    );
+    g_dbus_connection_emit_signal(
+        data->bus, NULL, "/StatusNotifierItem",
+        "org.kde.StatusNotifierItem", "NewIcon", NULL, NULL
+    );
+    g_dbus_connection_emit_signal(
+        data->bus, NULL, "/StatusNotifierItem",
+        "org.kde.StatusNotifierItem", "NewToolTip", NULL, NULL
+    );
 }
 
 void tray_notify_menu_changed(AppData *data) {

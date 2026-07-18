@@ -34,6 +34,8 @@ typedef struct {
     guint status_notifier_registration_id;
     guint dbus_menu_registration_id;
     guint menu_revision;
+    guint self_write_guard_source;
+    guint reload_source;
     gboolean is_reloading;
     gboolean initialized;
 } AppData;

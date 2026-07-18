@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TrayActions
+Comment=Configurable tray menu for Linux
+Exec=trayactions
+Icon=system-run
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+X-GNOME-UsesNotifications=false

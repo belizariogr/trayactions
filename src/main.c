@@ -115,6 +115,14 @@ static void application_shutdown(GApplication *application, gpointer user_data) 
         g_file_monitor_cancel(data->monitor);
         g_clear_object(&data->monitor);
     }
+    if (data->self_write_guard_source) {
+        g_source_remove(data->self_write_guard_source);
+        data->self_write_guard_source = 0;
+    }
+    if (data->reload_source) {
+        g_source_remove(data->reload_source);
+        data->reload_source = 0;
+    }
     tray_stop(data);
     g_clear_pointer(&data->menu_items, g_ptr_array_unref);
     g_clear_pointer(&data->app_workspaces, g_ptr_array_unref);

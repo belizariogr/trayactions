@@ -11,3 +11,11 @@ cc -std=c11 -Wall -Wextra -Wpedantic \
     $(pkg-config --cflags --libs glib-2.0)
 
 ./bin/test_menu_order
+
+cc -std=c11 -Wall -Wextra -Wpedantic \
+    -Isrc \
+    tests/test_workspace_route.c src/workspace_route.c \
+    -o bin/test_workspace_route \
+    $(pkg-config --cflags --libs glib-2.0)
+
+./bin/test_workspace_route

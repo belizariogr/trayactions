@@ -9,6 +9,7 @@
 #include "tray.h"
 #include "utils.h"
 #include "workspace.h"
+#include "preferences.h"
 
 // Global default configuration content
 const char *default_config_json =
@@ -190,10 +191,34 @@ void show_json_error_dialog(
 
 gboolean reload_configuration_timeout_cb(gpointer user_data) {
     AppData *data = (AppData *)user_data;
-    reload_configuration(data, FALSE); // Pass FALSE for subsequent reloads
+    data->reload_source = 0;
+    reload_configuration(data, FALSE);
     data->is_reloading = FALSE;
     g_print("Reload flag reset.\n");
-    return G_SOURCE_REMOVE; 
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean clear_self_write_guard(gpointer user_data) {
+    AppData *data = user_data;
+    if (data) {
+        data->self_write_guard_source = 0;
+        data->is_reloading = FALSE;
+    }
+    return G_SOURCE_REMOVE;
+}
+
+/* Prevent the file monitor from reloading over in-memory pointers still
+ * owned by an open Preferences window after we write the config ourselves. */
+static void guard_self_write(AppData *data) {
+    if (!data) {
+        return;
+    }
+    if (data->self_write_guard_source) {
+        g_source_remove(data->self_write_guard_source);
+        data->self_write_guard_source = 0;
+    }
+    data->is_reloading = TRUE;
+    data->self_write_guard_source = g_timeout_add(750, clear_self_write_guard, data);
 }
 
 void reload_configuration(AppData *data, gboolean is_initial_load) {
@@ -285,6 +310,8 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
     // --- Process final JSON (parsed or fallback) ---
     const char *preferences_icon = "";
     const char *quit_icon = "";
+    GPtrArray *new_assignments = NULL;
+    gboolean built_assignments = FALSE;
 
     if (!parse_error && parsed_json) {
         g_info("Processing valid JSON configuration...");
@@ -302,14 +329,11 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
 
         struct json_object *app_workspaces_obj = NULL;
         if (json_object_object_get_ex(parsed_json, "app_workspaces", &app_workspaces_obj)) {
-            GPtrArray *new_assignments = parse_app_workspaces(app_workspaces_obj);
-            g_clear_pointer(&data->app_workspaces, g_ptr_array_unref);
-            data->app_workspaces = new_assignments;
+            new_assignments = parse_app_workspaces(app_workspaces_obj);
         } else {
-            g_clear_pointer(&data->app_workspaces, g_ptr_array_unref);
-            data->app_workspaces = g_ptr_array_new_with_free_func(app_workspace_assignment_free);
+            new_assignments = g_ptr_array_new_with_free_func(app_workspace_assignment_free);
         }
-        workspace_watcher_refresh(data);
+        built_assignments = TRUE;
 
         if (json_object_object_get_ex(parsed_json, "indicator_icon", &indicator_icon_obj)) {
             const char *temp_icon_name = json_object_get_string(indicator_icon_obj);
@@ -360,7 +384,8 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
             quit_icon
         );
         if (!data->app_workspaces) {
-            data->app_workspaces = g_ptr_array_new_with_free_func(app_workspace_assignment_free);
+            new_assignments = g_ptr_array_new_with_free_func(app_workspace_assignment_free);
+            built_assignments = TRUE;
         }
     }
     if (parsed_json) {
@@ -370,7 +395,18 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
     if (!new_menu) {
         g_critical("Failed to create a menu. Keeping old menu if present.");
         g_free(allocated_icon_name);
+        if (built_assignments) {
+            g_ptr_array_unref(new_assignments);
+        }
         return;
+    }
+
+    /* Commit icon, menu, and assignments together after all builds succeed. */
+    if (built_assignments) {
+        g_clear_pointer(&data->app_workspaces, g_ptr_array_unref);
+        data->app_workspaces = new_assignments;
+        workspace_watcher_refresh(data);
+        preferences_reload_app_bindings(data);
     }
 
     indicator_icon_name = allocated_icon_name ? allocated_icon_name : default_indicator_icon;
@@ -386,6 +422,7 @@ void reload_configuration(AppData *data, gboolean is_initial_load) {
 
     data->menu_items = new_menu;
     tray_notify_menu_changed(data);
+    preferences_reload_menu_items(data);
     g_info("Set new menu.");
 }
 
@@ -410,10 +447,71 @@ void on_config_changed(GFileMonitor *monitor,
         event_type == G_FILE_MONITOR_EVENT_MOVED)
     {
         g_print("Config file change detected (event type: %d). Scheduling reload.\n", event_type);
+        if (data->reload_source) {
+            g_source_remove(data->reload_source);
+            data->reload_source = 0;
+        }
         data->is_reloading = TRUE;
         g_print("Reload flag set.\n");
-        g_timeout_add(500, reload_configuration_timeout_cb, data);
+        data->reload_source = g_timeout_add(500, reload_configuration_timeout_cb, data);
     }
+}
+
+static void sync_desktop_icon(const char *icon_name) {
+    if (!icon_name || !*icon_name) {
+        return;
+    }
+
+    char *desktop_path = g_build_filename(
+        g_get_user_data_dir(),
+        "applications",
+        "trayactions.desktop",
+        NULL
+    );
+    if (!g_file_test(desktop_path, G_FILE_TEST_IS_REGULAR)) {
+        g_free(desktop_path);
+        return;
+    }
+
+    GError *error = NULL;
+    GKeyFile *key_file = g_key_file_new();
+    if (!g_key_file_load_from_file(
+            key_file,
+            desktop_path,
+            G_KEY_FILE_KEEP_COMMENTS | G_KEY_FILE_KEEP_TRANSLATIONS,
+            &error
+        )) {
+        g_warning(
+            "Could not load desktop file '%s': %s",
+            desktop_path,
+            error->message
+        );
+        g_clear_error(&error);
+        g_key_file_unref(key_file);
+        g_free(desktop_path);
+        return;
+    }
+
+    g_key_file_set_string(
+        key_file,
+        G_KEY_FILE_DESKTOP_GROUP,
+        G_KEY_FILE_DESKTOP_KEY_ICON,
+        icon_name
+    );
+
+    if (!g_key_file_save_to_file(key_file, desktop_path, &error)) {
+        g_warning(
+            "Could not update desktop icon in '%s': %s",
+            desktop_path,
+            error->message
+        );
+        g_clear_error(&error);
+    } else {
+        g_info("Updated desktop icon to '%s' in %s", icon_name, desktop_path);
+    }
+
+    g_key_file_unref(key_file);
+    g_free(desktop_path);
 }
 
 gboolean config_save_indicator_icon(AppData *data, const char *icon_name) {
@@ -426,9 +524,12 @@ gboolean config_save_indicator_icon(AppData *data, const char *icon_name) {
         return FALSE;
     }
 
+    guard_self_write(data);
     json_object_object_add(root, "indicator_icon", json_object_new_string(icon_name));
     write_config_json(data->config_file_path, root);
     json_object_put(root);
+    sync_desktop_icon(icon_name);
+    tray_notify_icon_changed(data);
     return TRUE;
 }
 
@@ -455,6 +556,7 @@ gboolean config_save_app_workspaces(AppData *data) {
             json_object_array_add(array, item);
         }
     }
+    guard_self_write(data);
     json_object_object_add(root, "app_workspaces", array);
     write_config_json(data->config_file_path, root);
     json_object_put(root);
@@ -571,8 +673,11 @@ gboolean config_save_menu_items(AppData *data, GPtrArray *items) {
             json_object_array_add(array, json_item);
         }
     }
+    guard_self_write(data);
     json_object_object_add(root, "menu_items", array);
     write_config_json(data->config_file_path, root);
     json_object_put(root);
+    /* Refresh live tray immediately — file-monitor reload is suppressed by the guard. */
+    reload_configuration(data, FALSE);
     return TRUE;
 }

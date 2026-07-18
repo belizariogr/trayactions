@@ -6,6 +6,7 @@
 
 #include "config.h"
 #include "menu_order.h"
+#include "tray.h"
 #include "workspace.h"
 
 typedef struct {
@@ -159,6 +160,7 @@ static void on_icon_selected(GtkButton *button, gpointer user_data) {
         g_free(state->data->indicator_icon);
         state->data->indicator_icon = g_strdup(icon_name);
         update_icon_button(state, icon_name);
+        tray_notify_icon_changed(state->data);
         config_save_indicator_icon(state->data, icon_name);
     }
 
@@ -262,6 +264,47 @@ static void on_indicator_icon_clicked(GtkButton *button, gpointer user_data) {
     PreferencesState *state = user_data;
     (void)button;
     show_icon_picker(state, GTK_WINDOW(state->window), NULL, NULL);
+}
+
+static void on_open_config_clicked(GtkButton *button, gpointer user_data) {
+    PreferencesState *state = user_data;
+    (void)button;
+    if (!state || !state->data || !state->data->config_file_path) {
+        return;
+    }
+
+    const char *path = state->data->config_file_path;
+    GError *error = NULL;
+    char *uri = g_filename_to_uri(path, NULL, &error);
+    if (!uri) {
+        g_warning("Failed to build config URI: %s", error ? error->message : "unknown");
+        g_clear_error(&error);
+        return;
+    }
+
+    GdkAppLaunchContext *context = NULL;
+    GdkDisplay *display = gtk_widget_get_display(state->window);
+    if (display) {
+        context = gdk_display_get_app_launch_context(display);
+    }
+
+    if (!g_app_info_launch_default_for_uri(
+            uri,
+            context ? G_APP_LAUNCH_CONTEXT(context) : NULL,
+            &error
+        )) {
+        g_warning("Failed to open config file: %s", error->message);
+        g_clear_error(&error);
+
+        char *argv[] = {"xdg-open", (char *)path, NULL};
+        if (!g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &error)) {
+            g_warning("Failed to open config file via xdg-open: %s", error->message);
+            g_clear_error(&error);
+        }
+    }
+
+    g_clear_object(&context);
+    g_free(uri);
 }
 
 static void persist_menu_items(PreferencesState *state) {
@@ -829,14 +872,33 @@ static void menu_list_reload(PreferencesState *state) {
 
 static void apps_list_reload(PreferencesState *state);
 
+static AppWorkspaceAssignment *find_app_assignment(AppData *data, const char *app_id) {
+    if (!data || !data->app_workspaces || !app_id || !*app_id) {
+        return NULL;
+    }
+    for (guint i = 0; i < data->app_workspaces->len; i++) {
+        AppWorkspaceAssignment *assignment =
+            g_ptr_array_index(data->app_workspaces, i);
+        if (assignment && assignment->app_id &&
+            strcmp(assignment->app_id, app_id) == 0) {
+            return assignment;
+        }
+    }
+    return NULL;
+}
+
 static void persist_apps(PreferencesState *state) {
     config_save_app_workspaces(state->data);
 }
 
 static void on_app_workspace_changed(GtkSpinButton *spin, gpointer user_data) {
     PreferencesState *state = g_object_get_data(G_OBJECT(spin), "prefs-state");
-    AppWorkspaceAssignment *assignment = user_data;
-    if (!state || !assignment) {
+    const char *app_id = user_data;
+    if (!state || !app_id) {
+        return;
+    }
+    AppWorkspaceAssignment *assignment = find_app_assignment(state->data, app_id);
+    if (!assignment) {
         return;
     }
     assignment->workspace = gtk_spin_button_get_value_as_int(spin);
@@ -845,13 +907,22 @@ static void on_app_workspace_changed(GtkSpinButton *spin, gpointer user_data) {
 
 static void on_app_remove(GtkButton *button, gpointer user_data) {
     PreferencesState *state = user_data;
-    AppWorkspaceAssignment *assignment = g_object_get_data(G_OBJECT(button), "assignment");
-    if (!state || !assignment || !state->data->app_workspaces) {
+    const char *app_id = g_object_get_data(G_OBJECT(button), "app-id");
+    if (!state || !app_id || !state->data->app_workspaces) {
+        return;
+    }
+    AppWorkspaceAssignment *assignment = find_app_assignment(state->data, app_id);
+    if (!assignment) {
         return;
     }
     g_ptr_array_remove(state->data->app_workspaces, assignment);
     persist_apps(state);
     apps_list_reload(state);
+}
+
+static void free_signal_app_id(gpointer data, GClosure *closure) {
+    (void)closure;
+    g_free(data);
 }
 
 static GtkWidget *create_app_row(PreferencesState *state, AppWorkspaceAssignment *assignment) {
@@ -877,12 +948,19 @@ static GtkWidget *create_app_row(PreferencesState *state, AppWorkspaceAssignment
     GtkWidget *spin = gtk_spin_button_new_with_range(1, 64, 1);
     gtk_spin_button_set_value(GTK_SPIN_BUTTON(spin), assignment->workspace);
     g_object_set_data(G_OBJECT(spin), "prefs-state", state);
-    g_signal_connect(spin, "value-changed", G_CALLBACK(on_app_workspace_changed), assignment);
+    g_signal_connect_data(
+        spin,
+        "value-changed",
+        G_CALLBACK(on_app_workspace_changed),
+        g_strdup(assignment->app_id),
+        free_signal_app_id,
+        0
+    );
     gtk_box_append(GTK_BOX(row), spin);
 
     GtkWidget *remove = gtk_button_new_from_icon_name("user-trash-symbolic");
     gtk_widget_add_css_class(remove, "flat");
-    g_object_set_data(G_OBJECT(remove), "assignment", assignment);
+    g_object_set_data_full(G_OBJECT(remove), "app-id", g_strdup(assignment->app_id), g_free);
     g_signal_connect(remove, "clicked", G_CALLBACK(on_app_remove), state);
     gtk_box_append(GTK_BOX(row), remove);
 
@@ -1077,6 +1155,29 @@ static GtkWidget *build_menu_page(PreferencesState *state) {
     gtk_box_append(GTK_BOX(icon_row), state->icon_button);
     gtk_list_box_append(GTK_LIST_BOX(appearance), icon_row);
 
+    GtkWidget *json_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_set_margin_top(json_row, 10);
+    gtk_widget_set_margin_bottom(json_row, 10);
+    gtk_widget_set_margin_start(json_row, 12);
+    gtk_widget_set_margin_end(json_row, 12);
+
+    GtkWidget *json_text = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_hexpand(json_text, TRUE);
+    GtkWidget *json_title = gtk_label_new("Open JSON");
+    gtk_widget_set_halign(json_title, GTK_ALIGN_START);
+    GtkWidget *json_subtitle = gtk_label_new("Edit config.json in the default editor");
+    gtk_widget_set_halign(json_subtitle, GTK_ALIGN_START);
+    gtk_widget_add_css_class(json_subtitle, "dim-label");
+    gtk_widget_add_css_class(json_subtitle, "caption");
+    gtk_box_append(GTK_BOX(json_text), json_title);
+    gtk_box_append(GTK_BOX(json_text), json_subtitle);
+    gtk_box_append(GTK_BOX(json_row), json_text);
+
+    GtkWidget *json_button = gtk_button_new_with_label("Open");
+    g_signal_connect(json_button, "clicked", G_CALLBACK(on_open_config_clicked), state);
+    gtk_box_append(GTK_BOX(json_row), json_button);
+    gtk_list_box_append(GTK_LIST_BOX(appearance), json_row);
+
     gtk_box_append(GTK_BOX(page), build_section_label("Menu items"));
 
     state->menu_list = gtk_list_box_new();
@@ -1133,6 +1234,32 @@ static void on_preferences_destroy(GtkWidget *window, gpointer user_data) {
     AppData *data = user_data;
     (void)window;
     data->preferences_window = NULL;
+}
+
+void preferences_reload_app_bindings(AppData *data) {
+    if (!data || !data->preferences_window) {
+        return;
+    }
+    PreferencesState *state =
+        g_object_get_data(G_OBJECT(data->preferences_window), "preferences-state");
+    if (!state || !state->apps_list) {
+        return;
+    }
+    apps_list_reload(state);
+}
+
+void preferences_reload_menu_items(AppData *data) {
+    if (!data || !data->preferences_window) {
+        return;
+    }
+    PreferencesState *state =
+        g_object_get_data(G_OBJECT(data->preferences_window), "preferences-state");
+    if (!state || !state->menu_list) {
+        return;
+    }
+    g_clear_pointer(&state->menu_items, g_ptr_array_unref);
+    state->menu_items = config_load_editable_menu_items(data);
+    menu_list_reload(state);
 }
 
 void preferences_show(AppData *data) {

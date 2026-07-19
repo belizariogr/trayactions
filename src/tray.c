@@ -548,24 +548,22 @@ static const GDBusInterfaceVTable dbus_menu_vtable = {
 /*
  * StatusNotifier keep-alive
  * -------------------------
- * On COSMIC the watcher is cosmic-applet-status-area (D-Bus activatable as
- * com.system76.CosmicStatusNotifierWatcher, also owns
- * org.kde.StatusNotifierWatcher). The panel host can restart, the watcher
- * can vanish/reappear, or the item can be dropped from
- * RegisteredStatusNotifierItems while our process keeps running. A single
- * RegisterStatusNotifierItem at startup is not enough.
+ * On COSMIC the panel's Status Area applet owns org.kde.StatusNotifierWatcher
+ * (also advertised as com.system76.CosmicStatusNotifierWatcher). Do NOT D-Bus
+ * activate the Cosmic watcher service yourself: that starts a headless
+ * `--status-notifier-watcher` with no panel UI, steals the bus name, and the
+ * tray icons never appear.
  *
  * Strategy:
  *  1. Watch org.kde.StatusNotifierWatcher and (re)register when owned.
  *  2. Listen for StatusNotifierHostRegistered / our ItemUnregistered.
- *  3. Periodically verify we are still listed; if the watcher is missing,
- *     activate the Cosmic service; if we were dropped, register again.
+ *  3. Periodically verify we are still listed; if missing, register again.
+ *     If the watcher is absent, wait — the panel applet must provide it.
  */
 
 static const char *SNI_WATCHER_NAME = "org.kde.StatusNotifierWatcher";
 static const char *SNI_WATCHER_PATH = "/StatusNotifierWatcher";
 static const char *SNI_WATCHER_IFACE = "org.kde.StatusNotifierWatcher";
-static const char *SNI_COSMIC_WATCHER_NAME = "com.system76.CosmicStatusNotifierWatcher";
 
 static const guint SNI_REGISTER_MAX_ATTEMPTS = 30;
 static const guint SNI_REGISTER_RETRY_MS = 1000;
@@ -573,7 +571,6 @@ static const guint SNI_REGISTER_DEBOUNCE_MS = 750;
 static const guint SNI_HEALTH_INTERVAL_SEC = 10;
 
 static gboolean register_with_watcher(AppData *data, gboolean force);
-static void ensure_watcher_activated(AppData *data);
 
 static void clear_sni_register_retry(AppData *data) {
     if (data && data->sni_register_retry_source) {
@@ -605,17 +602,6 @@ static void schedule_register_retry(AppData *data) {
         g_timeout_add(SNI_REGISTER_RETRY_MS, retry_register_with_watcher, data);
 }
 
-static char *sni_service_id(AppData *data) {
-    const char *unique = data && data->bus
-                             ? g_dbus_connection_get_unique_name(data->bus)
-                             : NULL;
-    if (!unique) {
-        return NULL;
-    }
-    /* Explicit path matches hosts that store "busname/path" entries. */
-    return g_strdup_printf("%s/StatusNotifierItem", unique);
-}
-
 static gboolean registered_items_include_us(GVariant *items, AppData *data) {
     const char *unique = g_dbus_connection_get_unique_name(data->bus);
     if (!unique || !items) {
@@ -635,7 +621,6 @@ static gboolean registered_items_include_us(GVariant *items, AppData *data) {
             found = TRUE;
             break;
         }
-        /* Some hosts store only the path suffix after the unique name. */
         if (g_str_has_prefix(entry, unique) &&
             (entry[strlen(unique)] == '\0' || entry[strlen(unique)] == '/')) {
             found = TRUE;
@@ -644,28 +629,6 @@ static gboolean registered_items_include_us(GVariant *items, AppData *data) {
     }
     g_free(with_path);
     return found;
-}
-
-static void ensure_watcher_activated(AppData *data) {
-    if (!data || !data->bus) {
-        return;
-    }
-
-    /* Cosmic exposes an activatable well-known name; pinging starts it. */
-    g_dbus_connection_call(
-        data->bus,
-        SNI_COSMIC_WATCHER_NAME,
-        SNI_WATCHER_PATH,
-        "org.freedesktop.DBus.Peer",
-        "Ping",
-        NULL,
-        NULL,
-        G_DBUS_CALL_FLAGS_NONE,
-        3000,
-        NULL,
-        NULL,
-        NULL
-    );
 }
 
 static gboolean register_with_watcher(AppData *data, gboolean force) {
@@ -681,11 +644,15 @@ static gboolean register_with_watcher(AppData *data, gboolean force) {
     data->sni_last_register_ms = now;
     data->sni_register_attempts++;
 
-    char *service = sni_service_id(data);
-    if (!service) {
+    const char *unique = g_dbus_connection_get_unique_name(data->bus);
+    if (!unique) {
         return FALSE;
     }
 
+    /*
+     * Register the bus unique name. Cosmic defaults to path /StatusNotifierItem
+     * when no path is included (same as other working tray clients).
+     */
     GError *error = NULL;
     g_dbus_connection_call_sync(
         data->bus,
@@ -693,14 +660,13 @@ static gboolean register_with_watcher(AppData *data, gboolean force) {
         SNI_WATCHER_PATH,
         SNI_WATCHER_IFACE,
         "RegisterStatusNotifierItem",
-        g_variant_new("(s)", service),
+        g_variant_new("(s)", unique),
         NULL,
         G_DBUS_CALL_FLAGS_NONE,
         3000,
         NULL,
         &error
     );
-    g_free(service);
 
     if (error) {
         data->sni_registered = FALSE;
@@ -709,7 +675,6 @@ static gboolean register_with_watcher(AppData *data, gboolean force) {
             error->message
         );
         g_error_free(error);
-        ensure_watcher_activated(data);
         schedule_register_retry(data);
         return FALSE;
     }
@@ -839,13 +804,13 @@ static gboolean sni_health_check(gpointer user_data) {
 
     if (error) {
         g_info(
-            "Tray health check: watcher unavailable (%s); activating.",
+            "Tray health check: watcher unavailable (%s); waiting for panel.",
             error->message
         );
         g_error_free(error);
         data->sni_registered = FALSE;
-        ensure_watcher_activated(data);
-        /* NameAppeared / next health tick will register once the watcher is up. */
+        /* Do not D-Bus-activate Cosmic's watcher — that starts a headless
+         * process and blocks the Status Area UI from owning the bus name. */
         return G_SOURCE_CONTINUE;
     }
 
@@ -984,9 +949,6 @@ gboolean tray_start(AppData *data, GError **error) {
         data,
         NULL
     );
-
-    /* If the watcher is not up yet (common at login), kick Cosmic activation. */
-    ensure_watcher_activated(data);
 
     data->sni_health_source =
         g_timeout_add_seconds(SNI_HEALTH_INTERVAL_SEC, sni_health_check, data);

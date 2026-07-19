@@ -35,8 +35,7 @@ chmod 644 "$DESKTOP_DIR/trayactions.desktop"
 # Prefer the newly installed binary on login (replace older /usr/bin autostart entries).
 mkdir -p "$AUTOSTART_DIR"
 cp -f trayactions.desktop "$AUTOSTART_DIR/trayactions.desktop"
-# Resolve via PATH so /usr/local/bin wins over a stale /usr/bin copy.
-sed -i 's|^Exec=.*|Exec=trayactions|' "$AUTOSTART_DIR/trayactions.desktop"
+sed -i 's|^Exec=.*|Exec=/usr/local/bin/trayactions|' "$AUTOSTART_DIR/trayactions.desktop"
 sed -i "s|^Icon=.*|Icon=${DESKTOP_ICON}|" "$AUTOSTART_DIR/trayactions.desktop"
 chmod 644 "$AUTOSTART_DIR/trayactions.desktop"
 
@@ -52,13 +51,24 @@ echo "Installed autostart entry to $AUTOSTART_DIR/trayactions.desktop"
 # (GApplication single-instance would otherwise activate the old process and exit).
 if pgrep -x trayactions >/dev/null 2>&1; then
     pkill -x trayactions 2>/dev/null || true
-    # Wait briefly for the D-Bus name to be released.
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+    # Wait for the process and D-Bus name to go away (up to ~5s).
+    for _ in $(seq 1 50); do
         if ! pgrep -x trayactions >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.1
+    done
+    for _ in $(seq 1 30); do
+        if ! gdbus call --session \
+            --dest org.freedesktop.DBus \
+            --object-path /org/freedesktop/DBus \
+            --method org.freedesktop.DBus.NameHasOwner \
+            io.github.belizario.TrayActions 2>/dev/null | grep -q true; then
             break
         fi
         sleep 0.1
     done
 fi
 
-nohup trayactions > /dev/null 2>&1 &
+# Pin the newly installed binary — do not rely on PATH (/usr/bin may be stale).
+nohup /usr/local/bin/trayactions > /dev/null 2>&1 &

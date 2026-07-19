@@ -1,6 +1,7 @@
 #include "cosmic_workspace.h"
 
 #include <glib-unix.h>
+#include <poll.h>
 #include <string.h>
 #include <wayland-client.h>
 
@@ -45,6 +46,7 @@ typedef struct {
     gboolean appeared_after_sync;
     gboolean mapped_to_workspace;
     gboolean handled;
+    gboolean activated;
     guint retry_source;
     guint retry_count;
 } ToplevelInfo;
@@ -84,6 +86,7 @@ typedef struct {
     gboolean use_ext_toplevels;
     gboolean initial_sync_done;
     gboolean active;
+    gboolean can_activate;
     gint next_workspace_index;
 } CosmicState;
 
@@ -1144,9 +1147,23 @@ static void cosmic_toplevel_state(
     struct zcosmic_toplevel_handle_v1 *handle,
     struct wl_array *state
 ) {
-    (void)data;
+    ToplevelInfo *info = data;
     (void)handle;
-    (void)state;
+    if (!info) {
+        return;
+    }
+
+    gboolean activated = FALSE;
+    if (state) {
+        uint32_t *entry;
+        wl_array_for_each(entry, state) {
+            if (*entry == ZCOSMIC_TOPLEVEL_HANDLE_V1_STATE_ACTIVATED) {
+                activated = TRUE;
+                break;
+            }
+        }
+    }
+    info->activated = activated;
 }
 
 static void cosmic_toplevel_geometry(
@@ -1378,9 +1395,25 @@ static void cosmic_manager_capabilities(
     struct zcosmic_toplevel_manager_v1 *manager,
     struct wl_array *capabilities
 ) {
-    (void)data;
+    CosmicState *state = data;
     (void)manager;
-    (void)capabilities;
+    if (!state) {
+        return;
+    }
+
+    state->can_activate = FALSE;
+    if (!capabilities) {
+        return;
+    }
+
+    uint32_t *entry;
+    wl_array_for_each(entry, capabilities) {
+        if (*entry ==
+            ZCOSMIC_TOPLEVEL_MANAGER_V1_ZCOSMIC_TOPLELEVEL_MANAGEMENT_CAPABILITIES_V1_ACTIVATE) {
+            state->can_activate = TRUE;
+            break;
+        }
+    }
 }
 
 static const struct zcosmic_toplevel_manager_v1_listener cosmic_manager_listener = {
@@ -1785,9 +1818,45 @@ static gboolean wait_initial_sync(CosmicState *state) {
         return FALSE;
     }
 
-    /* CLI path has no GLib main loop; dispatch until the sync callback fires. */
+    /* CLI path has no GLib main loop; bound the wait so a hung compositor
+     * cannot stall --run-or-focus forever. */
+    const gint64 deadline_us = g_get_monotonic_time() + 3 * G_TIME_SPAN_SECOND;
+    int fd = wl_display_get_fd(state->display);
+
     while (!state->initial_sync_done) {
-        if (wl_display_dispatch(state->display) == -1) {
+        while (wl_display_prepare_read(state->display) != 0) {
+            if (wl_display_dispatch_pending(state->display) == -1) {
+                return FALSE;
+            }
+        }
+        wl_display_flush(state->display);
+
+        gint64 remaining_us = deadline_us - g_get_monotonic_time();
+        if (remaining_us <= 0) {
+            wl_display_cancel_read(state->display);
+            g_warning("Timed out waiting for COSMIC toplevel sync.");
+            return FALSE;
+        }
+
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int timeout_ms = (int)(remaining_us / 1000);
+        if (timeout_ms < 1) {
+            timeout_ms = 1;
+        }
+        int ret = poll(&pfd, 1, timeout_ms);
+        if (ret < 0) {
+            wl_display_cancel_read(state->display);
+            return FALSE;
+        }
+        if (ret == 0) {
+            wl_display_cancel_read(state->display);
+            g_warning("Timed out waiting for COSMIC toplevel sync.");
+            return FALSE;
+        }
+        if (wl_display_read_events(state->display) == -1) {
+            return FALSE;
+        }
+        if (wl_display_dispatch_pending(state->display) == -1) {
             return FALSE;
         }
     }
@@ -1799,11 +1868,57 @@ static gboolean wait_initial_sync(CosmicState *state) {
     return TRUE;
 }
 
+static gboolean wait_toplevel_activated(CosmicState *state, ToplevelInfo *toplevel) {
+    if (!state || !state->display || !toplevel) {
+        return FALSE;
+    }
+
+    const gint64 deadline_us = g_get_monotonic_time() + 2 * G_TIME_SPAN_SECOND;
+    int fd = wl_display_get_fd(state->display);
+
+    while (!toplevel->activated) {
+        while (wl_display_prepare_read(state->display) != 0) {
+            if (wl_display_dispatch_pending(state->display) == -1) {
+                return FALSE;
+            }
+        }
+        wl_display_flush(state->display);
+
+        gint64 remaining_us = deadline_us - g_get_monotonic_time();
+        if (remaining_us <= 0) {
+            wl_display_cancel_read(state->display);
+            return FALSE;
+        }
+
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int timeout_ms = (int)(remaining_us / 1000);
+        if (timeout_ms < 1) {
+            timeout_ms = 1;
+        }
+        int ret = poll(&pfd, 1, timeout_ms);
+        if (ret <= 0) {
+            wl_display_cancel_read(state->display);
+            return FALSE;
+        }
+        if (wl_display_read_events(state->display) == -1) {
+            return FALSE;
+        }
+        if (wl_display_dispatch_pending(state->display) == -1) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 gboolean cosmic_workspace_focus_app(const char *app_id) {
     if (!g_cosmic || !g_cosmic->active || !app_id || !*app_id) {
         return FALSE;
     }
     if (!g_cosmic->toplevel_manager || !g_cosmic->seat) {
+        return FALSE;
+    }
+    if (!g_cosmic->can_activate) {
+        g_info("COSMIC compositor does not advertise toplevel activate.");
         return FALSE;
     }
     if (!wait_initial_sync(g_cosmic)) {
@@ -1826,12 +1941,24 @@ gboolean cosmic_workspace_focus_app(const char *app_id) {
         return FALSE;
     }
 
+    gboolean already_active = match->activated;
     zcosmic_toplevel_manager_v1_activate(
         g_cosmic->toplevel_manager,
         match->cosmic,
         g_cosmic->seat
     );
-    if (wl_display_roundtrip(g_cosmic->display) == -1) {
+    if (wl_display_flush(g_cosmic->display) == -1) {
+        return FALSE;
+    }
+
+    if (already_active) {
+        /* Already focused; still flush a short roundtrip for the request. */
+        return wl_display_roundtrip(g_cosmic->display) != -1;
+    }
+
+    /* Protocol: state event is sent only if the compositor honors activate. */
+    if (!wait_toplevel_activated(g_cosmic, match)) {
+        g_info("Activate request for %s was not confirmed; treating as failure.", app_id);
         return FALSE;
     }
     return TRUE;

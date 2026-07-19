@@ -62,8 +62,9 @@ Launch (or focus) apps without starting the tray:
 `--run` always starts the command and exits immediately (does not wait for the
 app). `--run-or-focus` looks for an open window with the given `--app-id` on
 COSMIC and focuses it; if none is found (or focus is unavailable), it runs the
-command like `--run`. If the executable does not exist, the process exits with
-status `127`.
+command like `--run`. If the first executable token does not exist on `PATH`, the
+process exits with status `127` (later tokens in a shell string are not
+preflighted, because launch is asynchronous).
 
 Open **Preferences** from the tray menu to:
 - change the tray indicator icon (24×24 theme icon picker);

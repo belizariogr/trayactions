@@ -621,11 +621,6 @@ static gboolean registered_items_include_us(GVariant *items, AppData *data) {
             found = TRUE;
             break;
         }
-        if (g_str_has_prefix(entry, unique) &&
-            (entry[strlen(unique)] == '\0' || entry[strlen(unique)] == '/')) {
-            found = TRUE;
-            break;
-        }
     }
     g_free(with_path);
     return found;
@@ -652,9 +647,12 @@ static gboolean register_with_watcher(AppData *data, gboolean force) {
     /*
      * Register the bus unique name. Cosmic defaults to path /StatusNotifierItem
      * when no path is included (same as other working tray clients).
+     * NO_AUTO_START is required on COSMIC: auto-starting the watcher service
+     * launches a headless --status-notifier-watcher that steals the bus name
+     * from the panel Status Area UI.
      */
     GError *error = NULL;
-    g_dbus_connection_call_sync(
+    GVariant *reply = g_dbus_connection_call_sync(
         data->bus,
         SNI_WATCHER_NAME,
         SNI_WATCHER_PATH,
@@ -662,7 +660,7 @@ static gboolean register_with_watcher(AppData *data, gboolean force) {
         "RegisterStatusNotifierItem",
         g_variant_new("(s)", unique),
         NULL,
-        G_DBUS_CALL_FLAGS_NONE,
+        G_DBUS_CALL_FLAGS_NO_AUTO_START,
         3000,
         NULL,
         &error
@@ -678,14 +676,20 @@ static gboolean register_with_watcher(AppData *data, gboolean force) {
         schedule_register_retry(data);
         return FALSE;
     }
+    if (reply) {
+        g_variant_unref(reply);
+    }
 
     clear_sni_register_retry(data);
     data->sni_register_attempts = 0;
+    gboolean newly_registered = !data->sni_registered;
     data->sni_registered = TRUE;
     g_info("Registered StatusNotifierItem with the tray host.");
 
-    /* Nudge hosts that only refresh on item signals after a re-register. */
-    tray_notify_icon_changed(data);
+    /* Only nudge hosts when registration actually transitions on. */
+    if (newly_registered) {
+        tray_notify_icon_changed(data);
+    }
     return TRUE;
 }
 
@@ -701,6 +705,7 @@ static void on_sni_watcher_appeared(
     (void)name_owner;
     clear_sni_register_retry(data);
     data->sni_register_attempts = 0;
+    /* Force: watcher just appeared; do not debounce away the first register. */
     register_with_watcher(data, TRUE);
 }
 
@@ -735,8 +740,8 @@ static void on_sni_host_registered(
     (void)signal_name;
     (void)parameters;
     g_info("StatusNotifierHostRegistered; re-registering tray icon.");
-    data->sni_register_attempts = 0;
-    register_with_watcher(data, TRUE);
+    /* Debounced — host restart can emit bursts. */
+    register_with_watcher(data, FALSE);
 }
 
 static void on_sni_item_unregistered(
@@ -777,8 +782,7 @@ static void on_sni_item_unregistered(
 
     g_info("Our StatusNotifierItem was unregistered; restoring it.");
     data->sni_registered = FALSE;
-    data->sni_register_attempts = 0;
-    register_with_watcher(data, TRUE);
+    register_with_watcher(data, FALSE);
 }
 
 static gboolean sni_health_check(gpointer user_data) {
@@ -796,7 +800,7 @@ static gboolean sni_health_check(gpointer user_data) {
         "Get",
         g_variant_new("(ss)", SNI_WATCHER_IFACE, "RegisteredStatusNotifierItems"),
         G_VARIANT_TYPE("(v)"),
-        G_DBUS_CALL_FLAGS_NONE,
+        G_DBUS_CALL_FLAGS_NO_AUTO_START,
         2000,
         NULL,
         &error
@@ -829,8 +833,9 @@ static gboolean sni_health_check(gpointer user_data) {
             "Tray health check: icon missing from watcher list; re-registering."
         );
         data->sni_registered = FALSE;
-        data->sni_register_attempts = 0;
-        register_with_watcher(data, TRUE);
+        /* Keep attempt counter — do not reset, so retries stay bounded until
+         * the watcher reappears (NameAppeared resets). Debounce storms. */
+        register_with_watcher(data, FALSE);
     } else {
         data->sni_registered = TRUE;
     }
@@ -893,6 +898,10 @@ static void sni_unsubscribe_watcher_signals(AppData *data) {
 gboolean tray_start(AppData *data, GError **error) {
     GDBusNodeInfo *status_info = NULL;
     GDBusNodeInfo *menu_info = NULL;
+
+    data->sni_register_attempts = 0;
+    data->sni_last_register_ms = 0;
+    data->sni_registered = FALSE;
 
     data->bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, error);
     if (!data->bus) {
